@@ -419,23 +419,29 @@ to the binding. A safe call-site option or generated pair of wrappers would
 remove those duplicates. It must preserve compile-time signature checking and
 make collect-safe behavior visible in stack traces/diagnostics.
 
-## Local work that should not wait for upstream
+## Local lifecycle work completed
 
-The transport lifecycle is a local correctness issue:
+The local fork now:
 
-- `run-server` allocates one receive and one send native buffer per server and
-  opens a wake pipe.
-- reactor shutdown closes connections and executors, but does not currently
-  close both wake-pipe descriptors or free those two buffers;
-- the reactor future is discarded, so `stop-server` cannot wait for cleanup and
-  tests cannot prove deterministic termination; and
-- ownership of caller-supplied executors should be explicit before deciding
-  whether the server may shut them down.
+- retains the reactor future and a shared completion;
+- makes stop idempotent and bounded by `:stop-timeout-ms`;
+- closes the listener and both wake-pipe descriptors and frees the per-server
+  receive/send buffers exactly once from the reactor's outer `finally`;
+- serializes ordinary wakes, the terminal stop wake, and wake-pipe retirement
+  with an owner-independent CAS gate, preventing a write after descriptor close
+  or reuse;
+- rolls back every partial-start acquisition;
+- uses an explicit `:start`/`:abort` handoff so a scheduled future cannot enter
+  the reactor after constructor cleanup; and
+- preserves caller-supplied executors when construction fails.
 
-Fix this in jolt-tcp now: retain a completion handle, perform cleanup exactly
-once in `finally`, make stop idempotent and waitable/bounded, and test repeated
-start/stop plus partial-start failure. Upstream networking work can later
-replace the primitives without being responsible for this lifecycle bug.
+Focused lifecycle tests exercise wake/close ordering, start abort, partial
+failure, repeated immediate start/stop, idempotence, and bounded timeout. The
+full acceptance/property suite also passes.
+
+The existing successful-start contract still transfers caller-supplied
+executors to the server and shuts them down at stop. Whether a future API should
+offer explicit borrowed/owned modes remains a maintainer decision.
 
 The handler contract, backpressure policy, half-close response policy, and
 reactor exception isolation likewise remain jolt-tcp concerns.

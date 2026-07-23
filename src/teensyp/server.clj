@@ -88,13 +88,53 @@
 (defn- mark-pending! [ctx]
   (swap! (:pending (:srv ctx)) conj (pending-key ctx)))
 
+(defn- acquire-wake-gate!
+  "Acquire the short wake ownership gate without depending on thread identity.
+
+  Jolt futures can inherit the same Thread/currentThread bookkeeping cell.
+  ReentrantLock consequently may mistake two futures for one reentrant owner,
+  admit both, and later fail unlock with `thread does not own mutex`. An atom
+  CAS is owner-independent; wake!/close! are non-blocking, so contention lasts
+  only for one native call."
+  [gate]
+  (loop []
+    (when-not (compare-and-set! gate false true)
+      (Thread/yield)
+      (recur))))
+
+(defn- with-wake-gate [srv f]
+  (let [gate (:wake-gate srv)]
+    (acquire-wake-gate! gate)
+    (try
+      (f)
+      (finally
+        (reset! gate false)))))
+
 (defn- wake-server!
-  "Wake the reactor while it still owns an open wake pipe. stop-server performs
-  the terminal wake itself; late worker completions after running? becomes false
-  must not write to a descriptor that cleanup may already have closed."
+  "Admit and perform one ordinary worker wake under the wake ownership gate.
+
+  The non-blocking pipe write stays inside the gate so cleanup cannot close and
+  allow reuse of wake-w after this call has observed the server as running."
   [srv]
-  (when (or (nil? (:running? srv)) @(:running? srv))
-    (net/wake! (:wake-w srv))))
+  (with-wake-gate
+    srv
+    (fn []
+      (when (and @(:running? srv) @(:wake-open? srv))
+        (net/wake! (:wake-w srv))))))
+
+(defn- request-stop!
+  "Atomically stop ordinary wake admission and perform the one terminal wake.
+  Returns true only for the caller that transitioned the server to stopped."
+  [srv]
+  (with-wake-gate
+    srv
+    (fn []
+      (when (compare-and-set! (:running? srv) true false)
+        (when @(:wake-open? srv)
+          ;; A failed terminal wake is harmless: poll's finite timeout is the
+          ;; fallback, and cleanup still owns the descriptors.
+          (try (net/wake! (:wake-w srv)) (catch :default _ nil)))
+        true))))
 
 ;; --- flags -----------------------------------------------------------------
 (defn- flags-of  [ctx] (long @(:flags ctx)))
@@ -500,6 +540,25 @@
   [srv f]
   (try (f) (catch :default e (report-error srv e))))
 
+(defn- retire-wake-w!
+  "Close wake-w exactly once under the same gate used by all wake writers.
+
+  wake-open? is cleared before close, so a close failure cannot admit another
+  write. The read end remains open until after this returns, preventing SIGPIPE
+  for the wake that may already hold the gate."
+  [srv]
+  (let [close-error (volatile! nil)]
+    (with-wake-gate
+      srv
+      (fn []
+        (reset! (:running? srv) false)
+        (when (compare-and-set! (:wake-open? srv) true false)
+          (try (net/close! (:wake-w srv))
+               (catch :default e (vreset! close-error e))))))
+    ;; Never call user logging code while holding the ownership gate.
+    (when-let [e @close-error]
+      (report-error srv e))))
+
 (defn- cleanup-server!
   "Release every resource owned by a fully constructed server, exactly once.
 
@@ -509,7 +568,11 @@
   [srv]
   (when (compare-and-set! (:cleanup-started? srv) false true)
     (try
-      (reset! (:running? srv) false)
+      ;; Retire the write end before any other cleanup. Every admitted ordinary
+      ;; or terminal wake has completed before this close can run, and later
+      ;; workers observe wake-open? false under the same gate.
+      (retire-wake-w! srv)
+
       ;; Stop accepting before releasing any reactor storage. stop-server only
       ;; flips running? and wakes poll; the reactor owns all raw descriptors.
       (cleanup-call srv #(net/close! (:listen-fd srv)))
@@ -522,22 +585,23 @@
           (cleanup-call srv #(net/close! (:fd ctx)))
           (cleanup-call srv #((:handler (:opts srv)) @(:state ctx) nil))))
 
-      ;; Close the write end first while the read end is still open. A worker
-      ;; finishing concurrently may attempt one last wake; reversing this order
-      ;; would let that write hit a readerless pipe and raise process-wide
-      ;; SIGPIPE before wake-w itself is closed.
-      (cleanup-call srv #(net/close! (:wake-w srv)))
       (cleanup-call srv #(net/close! (:wake-r srv)))
       (cleanup-call srv #(ffi/free (:recv-buf srv)))
       (cleanup-call srv #(ffi/free (:send-buf srv)))
 
-      ;; Preserve the existing ownership contract for now: a supplied executor
-      ;; is transferred to the server and shut down with it. Avoid double
-      ;; shutdown when a caller deliberately supplies the same pool for both
-      ;; roles. A future API may add explicit borrowed/owned options.
-      (cleanup-call srv #(.shutdown (:executor srv)))
-      (when-not (identical? (:executor srv) (:callback-executor srv))
-        (cleanup-call srv #(.shutdown (:callback-executor srv))))
+      ;; Defaults are owned as soon as they are created. Caller-supplied pools
+      ;; transfer only after the reactor future is constructed and run-server is
+      ;; ready to return its handle; failed construction must leave them alone.
+      (let [transferred? @(:executors-transferred? srv)
+            shutdown-ex? (or (:owns-executor? srv) transferred?)
+            shutdown-cb? (or (:owns-callback-executor? srv) transferred?)]
+        (when shutdown-ex?
+          (cleanup-call srv #(.shutdown (:executor srv))))
+        (when (and shutdown-cb?
+                   (not (and shutdown-ex?
+                             (identical? (:executor srv)
+                                         (:callback-executor srv)))))
+          (cleanup-call srv #(.shutdown (:callback-executor srv)))))
       (finally
         ;; Completion means descriptors, native buffers, and executor shutdown
         ;; requests have all been handled. Always release waiters, even if a
@@ -559,6 +623,16 @@
     (when (and (:owns-callback-executor? state)
                (not (identical? (:executor state) (:callback-executor state))))
       (try (.shutdown (:callback-executor state)) (catch :default _ nil)))))
+
+(defn- run-after-reactor-start!
+  "Run `f` only after construction commits the server handoff.
+
+  A constructor failure after future-call returns delivers :abort instead. The
+  catch path then owns cleanup, and the scheduled future must not touch the
+  descriptors or native buffers it just released."
+  [reactor-start f]
+  (when (= :start (deref reactor-start))
+    (f)))
 
 (defn- handle-conn-events
   "Run one connection's poll events, containing any failure to that connection.
@@ -691,10 +765,20 @@
                            :owns-callback-executor? owns-callback-executor?)
                     (let [running? (atom true)
                           stopped (promise)
+                          ;; A newly scheduled future may begin before
+                          ;; future-call returns to this thread. Keep it outside
+                          ;; reactor-loop until the handle is complete and
+                          ;; caller-supplied executor ownership has transferred.
+                          reactor-start (promise)
                           srv {:conns (atom {}) :pending (atom #{})
                                :next-generation (atom 0)
                                :executor ex :callback-executor cb-ex
+                               :owns-executor? owns-executor?
+                               :owns-callback-executor? owns-callback-executor?
+                               :executors-transferred? (atom false)
                                :listen-fd listen-fd :wake-r wake-r :wake-w wake-w
+                               :wake-gate (atom false)
+                               :wake-open? (atom true)
                                :recv-buf recv-buf
                                :send-buf send-buf :send-buf-size 65536
                                :running? running? :stopped stopped
@@ -705,15 +789,12 @@
                                       :write-queue-size write-queue-size
                                       :control-queue-size control-queue-size
                                       :error-logger error-logger}}]
-                      (swap! startup assoc :srv srv)
-                      (let [reactor-future (future (reactor-loop srv))
-                            stop-fn
+                      (swap! startup assoc
+                             :srv srv
+                             :reactor-start reactor-start)
+                      (let [stop-fn
                             (fn []
-                              (when (compare-and-set! running? true false)
-                                ;; A failed wake is harmless: poll's finite
-                                ;; timeout is the fallback, and cleanup still
-                                ;; owns the fds.
-                                (try (net/wake! wake-w) (catch :default _ nil)))
+                              (request-stop! srv)
                               (when (= ::stop-timeout
                                        (deref stopped (long stop-timeout-ms)
                                               ::stop-timeout))
@@ -724,15 +805,29 @@
                                   {:err ::stop-timeout
                                    :timeout-ms (long stop-timeout-ms)
                                    :port port})))
-                              nil)]
-                        {:teensyp/server true :srv srv :listen-fd listen-fd
-                         :port port :stop stop-fn :close stop-fn
-                         :running? running? :stopped stopped
-                         :reactor-future reactor-future}))))))))
+                              nil)
+                            reactor-future
+                            (future
+                              (run-after-reactor-start!
+                               reactor-start
+                               #(reactor-loop srv)))
+                            handle {:teensyp/server true :srv srv
+                                    :listen-fd listen-fd :port port
+                                    :stop stop-fn :close stop-fn
+                                    :running? running? :stopped stopped
+                                    :reactor-future reactor-future}]
+                        (swap! startup assoc :reactor-future reactor-future)
+                        (reset! (:executors-transferred? srv) true)
+                        (deliver reactor-start :start)
+                        handle))))))))
         (catch :default e
           (if-let [srv (:srv @startup)]
             (do
-              (reset! (:running? srv) false)
+              (request-stop! srv)
+              ;; If future construction succeeded but a later constructor step
+              ;; failed, release its start gate after revoking wake admission.
+              ;; cleanup-server!'s guard makes the catch/reactor race harmless.
+              (deliver (:reactor-start @startup) :abort)
               (cleanup-server! srv))
             (cleanup-startup! @startup))
           (throw e))))))

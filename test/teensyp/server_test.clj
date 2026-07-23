@@ -404,6 +404,9 @@
                         :executor executor
                         :callback-executor executor
                         :wake-w -1
+                        :wake-gate (atom false)
+                        :wake-open? (atom true)
+                        :running? (atom true)
                         :opts {:handler (fn [_state ex]
                                           (swap! close-arities conj ex))}}
         ctx            (lifecycle-context srv 41 1)]
@@ -457,17 +460,22 @@
                  :recv-buf 71 :send-buf 72
                  :conns (atom {})
                  :executor ex :callback-executor cb-ex
+                 :owns-executor? true
+                 :owns-callback-executor? true
+                 :executors-transferred? (atom false)
                  :cleanup-started? (atom false)
                  :running? (atom true)
+                 :wake-gate (atom false)
+                 :wake-open? (atom true)
                  :stopped stopped
                  :opts {:handler no-op-handler :error-logger (fn [_])}}]
     (with-redefs [net/close! (fn [fd] (swap! closed conj fd))
                   ffi/free  (fn [ptr] (swap! freed conj ptr))]
       (@#'tcp/cleanup-server! srv)
       (@#'tcp/cleanup-server! srv))
-    ;; wake-w precedes wake-r so no late wake can write to a readerless pipe.
+    ;; wake-w is retired under the gate before any other descriptor cleanup.
     (check "full cleanup closes each owned descriptor exactly once"
-           [61 63 62] @closed)
+           [63 61 62] @closed)
     (check "full cleanup frees each native buffer exactly once"
            [71 72] @freed)
     (check "full cleanup shuts down the handler executor"
@@ -476,6 +484,142 @@
            true (.isShutdown cb-ex))
     (check "full cleanup publishes completion after release"
            :stopped (deref stopped 0 :timeout))))
+
+(defn- test-wake-close-serialization []
+  (let [events           (atom [])
+        wake-count       (atom 0)
+        worker-admitted  (promise)
+        release-worker   (promise)
+        terminal-admitted (promise)
+        release-terminal (promise)
+        wake-closed      (promise)
+        ex               (java.util.concurrent.Executors/newFixedThreadPool 1)
+        cb-ex            (java.util.concurrent.Executors/newFixedThreadPool 1)
+        stopped          (promise)
+        srv              {:listen-fd 61 :wake-r 62 :wake-w 63
+                          :recv-buf 71 :send-buf 72
+                          :conns (atom {})
+                          :executor ex :callback-executor cb-ex
+                          :owns-executor? true
+                          :owns-callback-executor? true
+                          :executors-transferred? (atom false)
+                          :cleanup-started? (atom false)
+                          :running? (atom true)
+                          :wake-gate (atom false)
+                          :wake-open? (atom true)
+                          :stopped stopped
+                          :opts {:handler no-op-handler
+                                 :error-logger (fn [_])}}]
+    (with-redefs
+      [net/wake!
+       (fn [_fd]
+         (case (swap! wake-count inc)
+           1 (do
+               ;; The worker has been admitted and owns the gate, but its
+               ;; synthetic native write is held until the test releases it.
+               (deliver worker-admitted true)
+               (deref release-worker 2000 :timeout)
+               (swap! events conj :worker-wake)
+               nil)
+           2 (do
+               ;; stop owns the same gate across running? CAS + terminal write.
+               (deliver terminal-admitted true)
+               (deref release-terminal 2000 :timeout)
+               (swap! events conj :terminal-wake)
+               nil)
+           (do (swap! events conj :unexpected-wake) nil)))
+       net/close!
+       (fn [fd]
+         (when (= fd 63)
+           (swap! events conj :wake-close)
+           (deliver wake-closed true)))
+       ffi/free (fn [_] nil)]
+      (let [worker (future (@#'tcp/wake-server! srv))]
+        (try
+          (check "worker wake is admitted before its native write"
+                 true (deref worker-admitted 1000 false))
+          (let [stopper (future (@#'tcp/request-stop! srv))]
+            ;; stop cannot acquire the ownership gate until this admitted worker
+            ;; write completes.
+            (deliver release-worker true)
+            (check "terminal stop waits behind the admitted worker wake"
+                   true (deref terminal-admitted 1000 false))
+            (let [cleaner (future (@#'tcp/cleanup-server! srv))]
+              (check "cleanup cannot close wake-w during the terminal write"
+                     :not-closed (deref wake-closed 50 :not-closed))
+              (deliver release-terminal true)
+              (deref worker 1000 :timeout)
+              (deref stopper 1000 :timeout)
+              (deref cleaner 1000 :timeout)
+              (check "admitted worker, terminal wake, and close are ordered"
+                     [:worker-wake :terminal-wake :wake-close] @events)
+              (check "serialized cleanup publishes completion"
+                     :stopped (deref stopped 0 :timeout))
+              ;; A worker arriving after close obtains the gate, observes both
+              ;; closed admission flags, and performs no native write.
+              (@#'tcp/wake-server! srv)
+              (check "no worker wake occurs after wake-w is closed"
+                     2 @wake-count)))
+          (finally
+            (deliver release-worker true)
+            (deliver release-terminal true)))))))
+
+(defn- test-future-construction-failure-preserves-supplied-executors []
+  (let [closed (atom [])
+        freed  (atom [])
+        allocs (atom 90)
+        error  (atom nil)
+        ex      (java.util.concurrent.Executors/newFixedThreadPool 1)
+        cb-ex   (java.util.concurrent.Executors/newFixedThreadPool 1)]
+    (try
+      (with-redefs
+        [net/listen-socket (fn [_port _opts] 81)
+         net/make-pipe     (fn [] [82 83])
+         net/close!        (fn [fd] (swap! closed conj fd))
+         ffi/alloc         (fn [_n] (swap! allocs inc))
+         ffi/free          (fn [ptr] (swap! freed conj ptr))
+         clojure.core/future-call
+         (fn [_]
+           (throw (ex-info "synthetic future construction failure"
+                           {:stage :future-construction})))]
+        (try
+          (tcp/run-server :port 19002 :handler no-op-handler
+                          :executor ex :callback-executor cb-ex)
+          (catch :default e (reset! error e))))
+      (check "future construction failure propagates"
+             :future-construction (:stage (ex-data @error)))
+      (check "future construction failure closes acquired descriptors"
+             {81 1, 82 1, 83 1} (frequencies @closed))
+      (check "future construction failure frees acquired native buffers"
+             {91 1, 92 1} (frequencies @freed))
+      (check "failed construction does not shut supplied handler executor"
+             false (.isShutdown ex))
+      (check "failed construction does not shut supplied callback executor"
+             false (.isShutdown cb-ex))
+      (finally
+        (.shutdown ex)
+        (.shutdown cb-ex)))))
+
+(defn- test-reactor-start-gate-honors-abort []
+  (let [calls (atom [])
+        aborted (promise)
+        started (promise)]
+    (deliver aborted :abort)
+    (check "aborted reactor start returns without entering released state"
+           nil
+           (@#'tcp/run-after-reactor-start!
+            aborted
+            #(do (swap! calls conj :aborted) :wrong)))
+    (check "aborted reactor start never invokes the reactor"
+           [] @calls)
+    (deliver started :start)
+    (check "committed reactor start invokes the reactor exactly once"
+           :ran
+           (@#'tcp/run-after-reactor-start!
+            started
+            #(do (swap! calls conj :started) :ran)))
+    (check "only the committed start ran"
+           [:started] @calls)))
 
 (defn- test-partial-start-cleanup []
   (let [closed (atom [])
@@ -576,6 +720,9 @@
   (test-eof-notification-contract)
   (test-reactor-owned-close-and-generation)
   (test-full-cleanup-is-exactly-once)
+  (test-wake-close-serialization)
+  (test-future-construction-failure-preserves-supplied-executors)
+  (test-reactor-start-gate-honors-abort)
   (test-partial-start-cleanup)
   (test-repeated-start-stop-is-complete-and-idempotent)
   (test-stop-timeout-is-bounded-and-recoverable)
