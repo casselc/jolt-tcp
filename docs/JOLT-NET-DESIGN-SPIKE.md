@@ -369,8 +369,9 @@ handed off no longer shuts down a caller-supplied pool
 (`src/teensyp/server.clj:583-597`, the `cleanup-startup!` path). On a successful
 stop, however, the steady-state contract still reaps supplied pools as well as
 created ones (`shutdown-ex? = owns? or transferred?` at
-`src/teensyp/server.clj:567-576`). Whether to keep that transfer-on-success
-behavior is the open decision below (#8).
+`src/teensyp/server.clj:567-576`). Decision #8 below (accepted) replaces that
+transfer-on-success behavior with borrowed-by-default: jolt-tcp reaps only pools
+it created, and adoption of a supplied pool becomes an explicit opt-in.
 
 ## Staged extraction and migration
 
@@ -471,26 +472,33 @@ The upstream gate should cover:
 
 ## Maintainer decisions
 
-These choices should be explicit before the corresponding stage:
+**Status: accepted (2026-07-23).** The maintainer has accepted all eight
+recommendations below as the decisions of record; each takes effect before its
+corresponding stage. "Recommended" is retained inline to show the reasoning that
+was accepted.
 
 1. **Location:** put the dependency-free socket core in `jolt.net`; keep OpenSSL
-   in an optional stdlib namespace. Recommended.
+   in an optional stdlib namespace. Recommended. **Accepted.**
 2. **Error surface:** tagged values for `would-block`/EOF, structured exceptions
    for failures. Recommended over returning undifferentiated `:error`.
+   **Accepted.**
 3. **Handle representation:** opaque record/map with idempotent close versus raw
    integer handles. Recommended: opaque ownership plus diagnostic raw access.
+   **Accepted.**
 4. **Windows wake backend:** connected UDP wake pair with `WSAPoll` versus a
    separate event-driven backend. Recommended for the first portable poller:
-   socket wake pair.
+   socket wake pair. **Accepted.**
 5. **IPv6 listener default:** OS default versus forced dual stack. Recommended:
-   expose the choice and leave the low-level default unchanged.
+   expose the choice and leave the low-level default unchanged. **Accepted.**
 6. **Cancellation scope:** document blocking DNS as non-cancellable in stage
    two versus introducing resolver workers immediately. Recommended: document
    first; do not entangle executor policy with the socket substrate.
+   **Accepted.**
 7. **TLS native acquisition:** retain `jolt.mvn-http` candidate lists temporarily
    versus blocking on a general native-artifact feature. Recommended: retain
-   temporarily.
-8. **jolt-tcp executor ownership:** move to *borrowed-by-default* — jolt-tcp
+   temporarily. **Accepted.**
+8. **jolt-tcp executor ownership: Accepted — move to *borrowed-by-default*** —
+   jolt-tcp
    reaps only pools it created (`:owns-executor?`), and a caller who wants a
    supplied pool adopted opts in with `:shutdown-executor?` /
    `:shutdown-callback-executor?`. Recommended over the current
