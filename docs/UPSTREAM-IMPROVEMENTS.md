@@ -359,6 +359,15 @@ The readiness API should specify ownership, thread safety, cancellation, and
 whether a wake is level- or edge-like. TLS may remain layered, but existing
 `mvn_http` TLS must be able to migrate without losing capabilities.
 
+Before deadline-bearing APIs land, upstream must correct `System/nanoTime`.
+It currently derives from UTC wall-clock milliseconds, so it is neither
+monotonic nor nanosecond-resolution. Non-blocking connect must return an
+explicit in-progress state and verify `SO_ERROR` after writable readiness.
+On Win64, socket handles and poll layouts must use pointer-width Winsock types
+rather than POSIX fd assumptions. The first resolver contract should accept
+ASCII and caller-provided IDNA forms, deferring automatic Unicode/
+`GetAddrInfoW` policy.
+
 ### Acceptance criteria
 
 - Echo/client fixtures pass over IPv4 and IPv6 on all supported hosts.
@@ -368,6 +377,8 @@ whether a wake is level- or edge-like. TLS may remain layered, but existing
   wake.
 - Peer/local address, EOF, half-close, timeouts, and closed-peer writes have
   cross-platform tests.
+- Deadline math uses a real monotonic clock, and non-blocking connect tests
+  distinguish readiness from the final `SO_ERROR` result.
 
 ### jolt-tcp payoff
 
