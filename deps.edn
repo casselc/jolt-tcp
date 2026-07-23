@@ -1,0 +1,22 @@
+;; jolt-tcp — a teensyp-compatible TCP server for jolt (Clojure on Chez Scheme).
+;; No JVM, no NIO: a single poll(2) reactor over non-blocking BSD sockets bound
+;; through jolt.ffi. Mirrors the teensyp.* namespaces so teensyp handlers run
+;; unmodified. Run tests with `joltc -M:test`.
+{:paths ["src"]
+
+ ;; The socket/poll/fcntl/pipe symbols live in libc, already loaded in the
+ ;; running joltc process. :process true makes jolt resolve them before the
+ ;; namespaces are required, so the (ffi/defcfn ...) bindings resolve at load.
+ :jolt/native [{:name "libc (POSIX sockets + poll)" :process true}]
+
+ ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
+ ;; it lives in :extra-deps rather than :deps. Pinned to the peeled commit behind
+ ;; release tag v0.1.2. Because the dep is alias-scoped, the installer needs the
+ ;; alias too: `joltc -A:test -m hegel.install`.
+ :aliases {:test {:extra-paths ["test"]
+                  :extra-deps {io.github.chucklehead-dev/jolt-hegel
+                               {:git/url "https://github.com/chucklehead-dev/jolt-hegel.git"
+                                :git/sha "ffe523023437862c7e474dc216346426318754c6"}}
+                  :main-opts ["-m" "teensyp.server-test"]}}
+
+ :tasks {test "joltc -M:test"}}

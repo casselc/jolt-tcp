@@ -1,0 +1,175 @@
+# jolt-tcp
+
+A [teensyp](https://github.com/weavejester/teensyp)-compatible TCP server for
+**[jolt](https://github.com/jolt-lang/jolt)** (Clojure on Chez Scheme) — no JVM,
+no Java NIO. It runs a single **poll(2) reactor** over non-blocking BSD sockets
+bound through `jolt.ffi`, plus a worker pool, and mirrors the `teensyp.*`
+namespaces so teensyp-style handlers run unmodified.
+
+This is to teensyp what
+[ring-chez-adapter](https://github.com/jolt-lang/ring-chez-adapter) is to Ring:
+a native reimplementation of the server contract on jolt's FFI sockets.
+
+## Usage
+
+```clojure
+(require '[teensyp.server :as tcp]
+         '[teensyp.buffer :as buf])
+
+(defn echo-handler
+  ([sock] {:bytes 0})                          ;; accept: initial per-conn state
+  ([state sock b]                              ;; read: b is a teensyp.buffer/Buffer
+   (let [n (buf/remaining b)]
+     (when (pos? n)
+       (tcp/write sock (buf/wrap (buf/get-bytes! b n))))  ;; consume + echo
+     (update state :bytes + n)))
+  ([state ex] (println "closed, bytes =" (:bytes state))))  ;; close: ex nil if graceful
+
+(def server (tcp/run-server :port 3000 :handler echo-handler :reuse-address? true))
+;; ... later ...
+(tcp/stop-server server)   ;; also works with (with-open [s (tcp/run-server ...)] ...)
+```
+
+The handler is one function with three arities — **accept**, **read**, **close**
+— threading a per-connection `state` value, exactly as in JVM teensyp. Calls are
+serial per connection: accept first, close last, reads sequential, and the write
+queue is drained before the next read.
+
+## API
+
+### `teensyp.server`
+- `(run-server & opts)` / `(run-server opts-map)` — start the server; returns a
+  handle usable with `stop-server` and `with-open`. Options: `:port` (required),
+  `:handler` (required), `:read-buffer-size` (8192), `:write-buffer-size`
+  (32768), `:write-queue-size` (64), `:control-queue-size` (32),
+  `:reuse-address?`, `:recv-buffer-size`, `:executor`, `:pool-size` (4),
+  `:callback-executor`, `:error-logger`, `:stop-timeout-ms` (5000).
+  - `:error-logger` is called on a reactor-side error. The offending connection
+    is closed, but the reactor keeps running — one bad connection never takes
+    down the server.
+  - `:callback-executor` runs write/control completion callbacks, and is
+    deliberately separate from `:executor`. A handler may block until one of its
+    writes completes (that is how a blocking sink over a socket is built); if the
+    releasing callback shared the handler pool, enough concurrent blocked
+    handlers would deadlock at exactly `pool-size`.
+  - The current API transfers ownership of supplied `:executor` and
+    `:callback-executor` values to the server; both are shut down when the server
+    stops. Do not share them with a longer-lived component. Making ownership
+    selectable is a future API decision.
+- `(stop-server server)` — stop accepting, close the listen socket, run each
+  open connection's close-arity, and wait up to `:stop-timeout-ms` for reactor
+  cleanup. Repeated calls are idempotent. A cleanup timeout throws structured
+  `ExceptionInfo` with `:err :teensyp.server/stop-timeout`; cleanup continues,
+  and a later call waits on the same completion.
+- `(write sock buffer)` / `(write sock buffer callback)` — queue a Buffer; the
+  zero-arg callback fires once fully written.
+- `(close sock)` / `(close sock callback)` — queue the socket to close.
+- `(pause-reads sock)` / `(resume-reads sock)` — backpressure controls.
+- `(peer-closed? sock)` — true once the peer has half-closed its write side, so
+  no more data will arrive. **The connection is not closed for you.** The peer
+  may still be reading and is usually owed a response, and the reactor cannot
+  tell when one is still coming (a handler on a worker thread raises no flag),
+  so the handler owns the close. The read arity is called once when this becomes
+  true, possibly with an empty buffer.
+- `Socket` protocol: `try-write`, `queue-control`, `queue-write`, `socket-info`,
+  `socket-lock`.
+
+### `teensyp.buffer`
+A byte-array-backed `ByteBuffer` equivalent (jolt has no `java.nio.ByteBuffer`):
+`buffer`, `wrap`, `str->buffer`, `buffer->str`, `remaining`, `has-remaining?`,
+`position`/`set-position!`, `limit`/`set-limit!`, `flip`, `compact`, `duplicate`,
+`index-of`, `index-of-array`, `read-line`, `copy`, `get-bytes!`, `put-bytes!`.
+Charset arguments are **name strings** (e.g. `"UTF-8"`), since jolt has no
+`java.nio.charset.Charset`.
+
+### `teensyp.stream`
+A jolt-native blocking-connection adapter (jolt cannot subclass
+`java.io.InputStream`/`OutputStream`). `stream-handler` runs `(f conn)` on its
+own thread, where `conn` supports `conn-recv`, `conn-read-line`, `conn-send`,
+`conn-close`, backed by a core.async channel the reader fills.
+
+### `teensyp.ffi-net`
+The FFI transport (sockets, `poll(2)`, self-pipe, errno) and a small blocking
+client used by the tests. Linux + macOS, loopback.
+
+## Differences from JVM teensyp
+
+- **Transport**: a `poll(2)` reactor + self-pipe wakeup instead of an NIO
+  `Selector`; all socket I/O runs on the reactor thread, so `try-write` always
+  queues (returns false). The completion callback and queue limits are unchanged.
+- **Buffer**: `teensyp.buffer/Buffer` (byte-array backed) in place of
+  `java.nio.ByteBuffer`; consume by advancing `position`, exactly as before.
+  Handlers using the `teensyp.buffer` functions are drop-in; handlers that called
+  raw `.position`/`.remaining` Java interop switch to `buf/position`/`buf/remaining`.
+- **Charsets**: name strings, not `Charset` objects.
+- **Streams**: `teensyp.stream` exposes a `conn` protocol, not `java.io` streams.
+- **socket-info**: `{:local-address nil :remote-address nil :fd fd}` (jolt has no
+  `InetSocketAddress`).
+- **Platform**: Linux + macOS loopback (POSIX). Windows (`WSAPoll`) is a follow-up.
+
+## Testing
+
+```
+joltc -M:test
+```
+
+Requires `joltc` on `PATH`, plus a one-time native install for the property
+layer:
+
+```
+joltc -A:test -m hegel.install
+```
+
+Three layers, all gated by the single `joltc -M:test` command, which exits
+non-zero on any failure.
+
+**Acceptance** (`teensyp.server-test`) — the framework-less harness. Starts
+servers on loopback and drives echo, line-reverse (with split frames),
+number-doubling, write-then-close, write-callback ordering, pause/resume
+backpressure, the stream layer, and 12 concurrent connections over real TCP.
+
+**Buffer properties** (`teensyp.buffer-property-test`) — generative properties for
+`teensyp.buffer` via [jolt-hegel](https://github.com/chucklehead-dev/jolt-hegel),
+run under `clojure.test`. Round trips, the `0 <= position <= limit <= capacity`
+invariant, `compact`/`copy`/`duplicate` conservation, and agreement between
+`index-of`/`index-of-array`/`read-line` and independent naive implementations —
+plus a stateful model replaying generated operation sequences against a Buffer,
+mirroring the server's read path.
+
+**TCP properties** (`teensyp.server-property-test`) — properties over real
+loopback connections, using the size-based chunking generator so the engine picks
+the split points (the acceptance suite pins one):
+
+- echo conservation under arbitrary chunking, with `:read-buffer-size 64` so
+  ordinary payloads repeatedly overflow the read buffer and exercise compaction,
+  the `FULL` flag and the resume path;
+- line framing invariance under arbitrary chunking;
+- chained write-callback ordering;
+- pause/resume backpressure losing nothing;
+- a single write larger than the 65536-byte send buffer, driving `send-chunk!`'s
+  partial-send/EAGAIN loop;
+- `teensyp.stream` line framing under arbitrary chunking.
+
+Every case ends in a half-close and drains to a real EOF — bounded in time, never
+slept on — so the EOF path is covered on every case. The stream property was
+promoted into the default gate after 30 consecutive 25-case stress runs
+completed cleanly; `run-stream-property!` remains available for focused stress.
+
+The bounded [reactor lifecycle
+proofs](docs/proofs/reactor-lifecycle-invariants.md) preserve the fd-generation,
+EOF byte-visibility, and recursive-lock arguments together with their SAT/UNSAT
+controls and executable runtime witnesses.
+
+jolt-hegel is a test-only dependency, pinned by SHA in the `:test` alias.
+Property failures print a replayable seed.
+
+> **jolt AOT cache caveat.** jolt's AOT cache key can collide between two
+> different contents of the same namespace — observed twice here, including an
+> edit that only *reordered* lines and so left the file size unchanged. The
+> result is that jolt silently runs stale compiled code. If a change appears to
+> have no effect, evict the entry:
+> `rm -f ~/.jolt/aot-cache/v0.4.15/v1/<namespace>-*`
+
+## License
+
+EPL-2.0 OR GPL-2.0-or-later, matching teensyp.

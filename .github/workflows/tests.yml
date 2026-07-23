@@ -1,0 +1,32 @@
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install joltc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liblz4-1 zlib1g libtinfo6 libssl3 curl
+          tag=$(curl -fsSL https://api.github.com/repos/jolt-lang/jolt/releases/latest \
+                | grep -oP '"tag_name":\s*"\K[^"]+')
+          url=$(curl -fsSL "https://api.github.com/repos/jolt-lang/jolt/releases/latest" \
+                | grep -oP '"browser_download_url":\s*"\K[^"]+x86_64-linux\.tar\.gz')
+          echo "installing joltc $tag from $url"
+          mkdir -p "$HOME/.jolt"
+          curl -fsSL "$url" | tar -xz -C "$HOME/.jolt"
+          chmod +x "$HOME/.jolt/joltc"
+          echo "$HOME/.jolt" >> "$GITHUB_PATH"
+
+      # jolt-hegel drives the property/stateful layers through libhegel over FFI.
+      # The binary and the target shim are downloaded and SHA-256 verified here so
+      # the test run itself needs no network.
+      - name: Install libhegel
+        run: JOLT_PWD="$PWD" joltc -A:test -m hegel.install
+
+      - name: Run tests
+        run: JOLT_PWD="$PWD" joltc -M:test
