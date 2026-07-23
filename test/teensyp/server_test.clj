@@ -462,7 +462,8 @@
                  :executor ex :callback-executor cb-ex
                  :owns-executor? true
                  :owns-callback-executor? true
-                 :executors-transferred? (atom false)
+                 :shutdown-executor? true
+                 :shutdown-callback-executor? true
                  :cleanup-started? (atom false)
                  :running? (atom true)
                  :wake-gate (atom false)
@@ -502,7 +503,8 @@
                           :executor ex :callback-executor cb-ex
                           :owns-executor? true
                           :owns-callback-executor? true
-                          :executors-transferred? (atom false)
+                          :shutdown-executor? true
+                          :shutdown-callback-executor? true
                           :cleanup-started? (atom false)
                           :running? (atom true)
                           :wake-gate (atom false)
@@ -599,6 +601,64 @@
       (finally
         (.shutdown ex)
         (.shutdown cb-ex)))))
+
+(defn- test-future-construction-failure-shuts-adopted-executors []
+  (let [ex    (java.util.concurrent.Executors/newFixedThreadPool 1)
+        cb-ex (java.util.concurrent.Executors/newFixedThreadPool 1)]
+    (try
+      (with-redefs
+        [net/listen-socket (fn [_port _opts] 81)
+         net/make-pipe     (fn [] [82 83])
+         net/close!        (fn [_fd] nil)
+         ffi/alloc         (fn [_n] 91)
+         ffi/free          (fn [_ptr] nil)
+         clojure.core/future-call
+         (fn [_]
+           (throw (ex-info "synthetic future construction failure"
+                           {:stage :future-construction})))]
+        (try
+          (tcp/run-server :port 19003 :handler no-op-handler
+                          :executor ex :callback-executor cb-ex
+                          :shutdown-executor? true
+                          :shutdown-callback-executor? true)
+          (catch :default _ nil)))
+      (check "failed construction shuts an explicitly adopted handler executor"
+             true (.isShutdown ex))
+      (check "failed construction shuts an explicitly adopted callback executor"
+             true (.isShutdown cb-ex))
+      (finally
+        (.shutdown ex)
+        (.shutdown cb-ex)))))
+
+(defn- test-supplied-executors-are-borrowed-unless-adopted []
+  (let [port  (+ 19450 (rand-int 100))
+        ex    (java.util.concurrent.Executors/newFixedThreadPool 1)
+        cb-ex (java.util.concurrent.Executors/newFixedThreadPool 1)]
+    (try
+      (let [srv (tcp/run-server :port port :handler no-op-handler
+                                :reuse-address? true
+                                :executor ex :callback-executor cb-ex)]
+        (tcp/stop-server srv)
+        (check "successful stop preserves a borrowed handler executor"
+               false (.isShutdown ex))
+        (check "successful stop preserves a borrowed callback executor"
+               false (.isShutdown cb-ex)))
+      (finally
+        (.shutdown ex)
+        (.shutdown cb-ex))))
+  (let [port  (+ 19550 (rand-int 100))
+        ex    (java.util.concurrent.Executors/newFixedThreadPool 1)
+        cb-ex (java.util.concurrent.Executors/newFixedThreadPool 1)]
+    (let [srv (tcp/run-server :port port :handler no-op-handler
+                              :reuse-address? true
+                              :executor ex :callback-executor cb-ex
+                              :shutdown-executor? true
+                              :shutdown-callback-executor? true)]
+      (tcp/stop-server srv)
+      (check "successful stop shuts an explicitly adopted handler executor"
+             true (.isShutdown ex))
+      (check "successful stop shuts an explicitly adopted callback executor"
+             true (.isShutdown cb-ex)))))
 
 (defn- test-reactor-start-gate-honors-abort []
   (let [calls (atom [])
@@ -722,6 +782,8 @@
   (test-full-cleanup-is-exactly-once)
   (test-wake-close-serialization)
   (test-future-construction-failure-preserves-supplied-executors)
+  (test-future-construction-failure-shuts-adopted-executors)
+  (test-supplied-executors-are-borrowed-unless-adopted)
   (test-reactor-start-gate-honors-abort)
   (test-partial-start-cleanup)
   (test-repeated-start-stop-is-complete-and-idempotent)

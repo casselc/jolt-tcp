@@ -356,22 +356,12 @@ these rules for listener fd, self-pipe fds, receive/send native buffers,
 connections, executors, reactor future, and completion.
 
 Executor ownership is intentionally not part of `jolt.net`. The raw network
-layer should not create handler pools. Ownership is a jolt-tcp API decision, and
-the current implementation now distinguishes two facts explicitly: whether
-jolt-tcp *created* a pool (`:owns-executor?` / `:owns-callback-executor?`, true
-only when the caller passed no executor) and whether ownership of a supplied
-pool has been *transferred* to a successfully started server
-(`:executors-transferred?`, flipped only once the reactor future exists and the
-handle is about to be returned).
-
-This already fixes the dangerous case: a start that fails before the reactor is
-handed off no longer shuts down a caller-supplied pool
-(`src/teensyp/server.clj:583-597`, the `cleanup-startup!` path). On a successful
-stop, however, the steady-state contract still reaps supplied pools as well as
-created ones (`shutdown-ex? = owns? or transferred?` at
-`src/teensyp/server.clj:567-576`). Decision #8 below (accepted) replaces that
-transfer-on-success behavior with borrowed-by-default: jolt-tcp reaps only pools
-it created, and adoption of a supplied pool becomes an explicit opt-in.
+layer should not create handler pools. Ownership is a jolt-tcp API decision.
+The accepted policy is now implemented: jolt-tcp always shuts down pools it
+creates, borrows supplied pools by default, and adopts a supplied pool only when
+the caller sets `:shutdown-executor?` or
+`:shutdown-callback-executor?`. The same rule governs startup rollback and
+normal stop, so a borrowed application pool is never silently shut down.
 
 ## Staged extraction and migration
 
@@ -497,11 +487,11 @@ was accepted.
 7. **TLS native acquisition:** retain `jolt.mvn-http` candidate lists temporarily
    versus blocking on a general native-artifact feature. Recommended: retain
    temporarily. **Accepted.**
-8. **jolt-tcp executor ownership: Accepted — move to *borrowed-by-default*** —
-   jolt-tcp
-   reaps only pools it created (`:owns-executor?`), and a caller who wants a
+8. **jolt-tcp executor ownership: Accepted and implemented —
+   *borrowed-by-default*.** jolt-tcp reaps only pools it created
+   (`:owns-executor?`), and a caller who wants a
    supplied pool adopted opts in with `:shutdown-executor?` /
-   `:shutdown-callback-executor?`. Recommended over the current
+   `:shutdown-callback-executor?`. Recommended over the former
    transfer-on-success behavior for three reasons. First, least surprise: a
    supplied `ExecutorService` is commonly shared across servers or mixed with
    other application work, and silently shutting it down on `stop-server` is a
@@ -510,8 +500,9 @@ was accepted.
    (the caller, or process exit, reclaims it), whereas shutting down a pool the
    caller still uses elsewhere causes unrecoverable `RejectedExecutionException`
    in unrelated code. Third, it simplifies the implementation — the shutdown
-   decision collapses to `:owns-executor?`, the `:executors-transferred?` flag
-   and its reset in `run-server` disappear, and `cleanup-server!` and
+   decision collapses to explicit cleanup flags, the
+   `:executors-transferred?` flag and its reset in `run-server` disappear, and
+   `cleanup-server!` and
    `cleanup-startup!` become symmetric (both reap iff owned, plus the explicit
    opt-in). `with-open` ergonomics are preserved because the common no-executor
    case still self-cleans. Migration cost is one greppable, documented break:

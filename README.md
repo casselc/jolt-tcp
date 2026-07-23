@@ -43,7 +43,9 @@ queue is drained before the next read.
   `:handler` (required), `:read-buffer-size` (8192), `:write-buffer-size`
   (32768), `:write-queue-size` (64), `:control-queue-size` (32),
   `:reuse-address?`, `:recv-buffer-size`, `:executor`, `:pool-size` (4),
-  `:callback-executor`, `:error-logger`, `:stop-timeout-ms` (5000).
+  `:callback-executor`, `:shutdown-executor?` (false),
+  `:shutdown-callback-executor?` (false), `:error-logger`, and
+  `:stop-timeout-ms` (5000).
   - `:error-logger` is called on a reactor-side error. The offending connection
     is closed, but the reactor keeps running — one bad connection never takes
     down the server.
@@ -52,10 +54,11 @@ queue is drained before the next read.
     writes completes (that is how a blocking sink over a socket is built); if the
     releasing callback shared the handler pool, enough concurrent blocked
     handlers would deadlock at exactly `pool-size`.
-  - The current API transfers ownership of supplied `:executor` and
-    `:callback-executor` values to the server; both are shut down when the server
-    stops. Do not share them with a longer-lived component. Making ownership
-    selectable is a future API decision.
+  - Supplied `:executor` and `:callback-executor` values are borrowed by default
+    and remain usable after the server stops. Pools created by the server are
+    always shut down. Set `:shutdown-executor? true` and/or
+    `:shutdown-callback-executor? true` to let the server adopt and shut down a
+    supplied pool, including cleanup after a failed start.
 - `(stop-server server)` — stop accepting, close the listen socket, run each
   open connection's close-arity, and wait up to `:stop-timeout-ms` for reactor
   cleanup. Repeated calls are idempotent. A cleanup timeout throws structured

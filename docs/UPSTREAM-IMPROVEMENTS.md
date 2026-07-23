@@ -433,15 +433,17 @@ The local fork now:
 - rolls back every partial-start acquisition;
 - uses an explicit `:start`/`:abort` handoff so a scheduled future cannot enter
   the reactor after constructor cleanup; and
-- preserves caller-supplied executors when construction fails.
+- borrows caller-supplied executors by default across both failed construction
+  and successful stop, while allowing explicit adoption through
+  `:shutdown-executor?` and `:shutdown-callback-executor?`.
 
 Focused lifecycle tests exercise wake/close ordering, start abort, partial
 failure, repeated immediate start/stop, idempotence, and bounded timeout. The
 full acceptance/property suite also passes.
 
-The existing successful-start contract still transfers caller-supplied
-executors to the server and shuts them down at stop. Whether a future API should
-offer explicit borrowed/owned modes remains a maintainer decision.
+Executor ownership is now explicit: server-created pools are always reaped,
+supplied pools remain caller-owned unless their matching shutdown option is
+true, and the same policy applies to startup rollback and normal stop.
 
 The handler contract, backpressure policy, half-close response policy, and
 reactor exception isolation likewise remain jolt-tcp concerns.

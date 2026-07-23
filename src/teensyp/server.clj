@@ -589,12 +589,11 @@
       (cleanup-call srv #(ffi/free (:recv-buf srv)))
       (cleanup-call srv #(ffi/free (:send-buf srv)))
 
-      ;; Defaults are owned as soon as they are created. Caller-supplied pools
-      ;; transfer only after the reactor future is constructed and run-server is
-      ;; ready to return its handle; failed construction must leave them alone.
-      (let [transferred? @(:executors-transferred? srv)
-            shutdown-ex? (or (:owns-executor? srv) transferred?)
-            shutdown-cb? (or (:owns-callback-executor? srv) transferred?)]
+      ;; Pools created by the server are always reaped. Caller-supplied pools
+      ;; are borrowed unless their corresponding explicit shutdown option opted
+      ;; them into server ownership.
+      (let [shutdown-ex? (:shutdown-executor? srv)
+            shutdown-cb? (:shutdown-callback-executor? srv)]
         (when shutdown-ex?
           (cleanup-call srv #(.shutdown (:executor srv))))
         (when (and shutdown-cb?
@@ -610,18 +609,20 @@
 
 (defn- cleanup-startup!
   "Release resources acquired before a complete server can be handed to the
-  reactor. Caller-supplied executors are not touched on a failed start because
-  the server never took control of them."
+  reactor. Caller-supplied executors are borrowed by default; an explicit
+  shutdown opt-in authorizes cleanup here as well as after a successful start."
   [state]
   (when (compare-and-set! (:cleanup-started? state) false true)
     (doseq [fd (remove nil? [(:listen-fd state) (:wake-r state) (:wake-w state)])]
       (try (net/close! fd) (catch :default _ nil)))
     (doseq [ptr (remove nil? [(:recv-buf state) (:send-buf state)])]
       (try (ffi/free ptr) (catch :default _ nil)))
-    (when (:owns-executor? state)
+    (when (:shutdown-executor? state)
       (try (.shutdown (:executor state)) (catch :default _ nil)))
-    (when (and (:owns-callback-executor? state)
-               (not (identical? (:executor state) (:callback-executor state))))
+    (when (and (:shutdown-callback-executor? state)
+               (not (and (:shutdown-executor? state)
+                         (identical? (:executor state)
+                                     (:callback-executor state)))))
       (try (.shutdown (:callback-executor state)) (catch :default _ nil)))))
 
 (defn- run-after-reactor-start!
@@ -721,6 +722,11 @@
                                  separate from :executor so a handler blocked on
                                  its own write cannot starve the callback that
                                  releases it (defaults to a dedicated pool)
+    :shutdown-executor? false    adopt and shut down a supplied :executor;
+                                 server-created executors are always shut down
+    :shutdown-callback-executor? false
+                                 adopt and shut down a supplied callback pool;
+                                 server-created pools are always shut down
     :stop-timeout-ms    5000     maximum time stop-server waits for reactor
                                  cleanup before throwing ::stop-timeout
 
@@ -729,9 +735,13 @@
   [& opts]
   (let [{:keys [port handler read-buffer-size write-buffer-size write-queue-size
                 control-queue-size reuse-address? recv-buffer-size executor pool-size
-                error-logger callback-executor stop-timeout-ms]
+                error-logger callback-executor
+                shutdown-executor? shutdown-callback-executor?
+                stop-timeout-ms]
          :or   {read-buffer-size 8192 write-buffer-size 32768 write-queue-size 64
                 control-queue-size 32 pool-size 4
+                shutdown-executor? false
+                shutdown-callback-executor? false
                 stop-timeout-ms 5000
                 error-logger default-error-logger}
          :as _m}
@@ -753,29 +763,41 @@
                 (swap! startup assoc :send-buf send-buf)
                 (let [owns-executor? (nil? executor)
                       ex (or executor
-                             (java.util.concurrent.Executors/newFixedThreadPool pool-size))]
-                  (swap! startup assoc :executor ex :owns-executor? owns-executor?)
+                             (java.util.concurrent.Executors/newFixedThreadPool pool-size))
+                      shutdown-executor-on-cleanup?
+                      (or owns-executor? (true? shutdown-executor?))]
+                  (swap! startup assoc
+                         :executor ex
+                         :owns-executor? owns-executor?
+                         :shutdown-executor? shutdown-executor-on-cleanup?)
                   (let [owns-callback-executor? (nil? callback-executor)
                         ;; Separate from the handler pool on purpose — see
                         ;; submit-callback.
                         cb-ex (or callback-executor
-                                  (java.util.concurrent.Executors/newCachedThreadPool))]
+                                  (java.util.concurrent.Executors/newCachedThreadPool))
+                        shutdown-callback-on-cleanup?
+                        (or owns-callback-executor?
+                            (true? shutdown-callback-executor?))]
                     (swap! startup assoc
                            :callback-executor cb-ex
-                           :owns-callback-executor? owns-callback-executor?)
+                           :owns-callback-executor? owns-callback-executor?
+                           :shutdown-callback-executor?
+                           shutdown-callback-on-cleanup?)
                     (let [running? (atom true)
                           stopped (promise)
                           ;; A newly scheduled future may begin before
                           ;; future-call returns to this thread. Keep it outside
-                          ;; reactor-loop until the handle is complete and
-                          ;; caller-supplied executor ownership has transferred.
+                          ;; reactor-loop until the handle is complete.
                           reactor-start (promise)
                           srv {:conns (atom {}) :pending (atom #{})
                                :next-generation (atom 0)
                                :executor ex :callback-executor cb-ex
                                :owns-executor? owns-executor?
                                :owns-callback-executor? owns-callback-executor?
-                               :executors-transferred? (atom false)
+                               :shutdown-executor?
+                               shutdown-executor-on-cleanup?
+                               :shutdown-callback-executor?
+                               shutdown-callback-on-cleanup?
                                :listen-fd listen-fd :wake-r wake-r :wake-w wake-w
                                :wake-gate (atom false)
                                :wake-open? (atom true)
@@ -817,7 +839,6 @@
                                     :running? running? :stopped stopped
                                     :reactor-future reactor-future}]
                         (swap! startup assoc :reactor-future reactor-future)
-                        (reset! (:executors-transferred? srv) true)
                         (deliver reactor-start :start)
                         handle))))))))
         (catch :default e
