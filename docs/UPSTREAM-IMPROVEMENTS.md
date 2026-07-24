@@ -17,10 +17,12 @@ The vendored [`stdlib/jolt/ffi.clj`](../refs/jolt/stdlib/jolt/ffi.clj) remains a
 thin macro surface over host-provided primitives. Recheck every claim against
 the exact upstream SHA before removing a workaround.
 
-The separate local Jolt proposal fork checkpoints packages 3--5 at `3105198a`
-and the AOT proof record at `cb1ca22c`. Its known-unsound runtime AOT prototype
-is isolated on `research/aot-v5-prototype` at `21062d5b`; none of these commits
-has been pushed and no pull request has been opened.
+The separate local Jolt proposal fork has the initial packages 2--5 checkpoint
+at `3105198a`, the fail-closed target correction at `34fabb2c`, and the AOT
+proof record through `6df64292`, followed by the host-class registration seam at
+`287f9022`. Its known-unsound runtime AOT prototype is isolated on
+`research/aot-v5-prototype` at `21062d5b`; none of these commits has been pushed
+and no pull request has been opened.
 
 ## Priority summary
 
@@ -71,7 +73,7 @@ Live fixtures found compile-time reads of ordinary nonmacro Vars without
 Other failures crossed reader/compiler callbacks, aliases, retained namespace
 cells, direct/nested loading, and selection-time mutation.
 
-The checked-in 41-model Chiasmus/Z3 suite proves bounded gates only if every
+The checked-in 44-model Chiasmus/Z3 suite proves bounded gates only if every
 consumed compiler input is observed completely, synchronously, and through
 non-spoofable instrumentation. It does not prove instrumentation completeness.
 See the cross-project
@@ -207,6 +209,14 @@ The reactor removes two hot-path allocation/copy stages, and
 `teensyp.buffer` can implement compaction and range operations on a common
 primitive.
 
+### Local proposal status
+
+Jolt proposal commit `3105198a` implements the overlap/range API and passes
+17/17 focused correctness checks. It lets callers avoid intermediate Jolt
+arrays, but the FFI host path still copies per byte and no before/after
+allocation or throughput benchmark has been recorded. Treat the performance
+criterion as open.
+
 ## 4. Add narrow integer types to `jolt.ffi`
 
 ### Current constraint
@@ -338,13 +348,20 @@ from OS and architecture.
 - Values agree with compiler/native facts on Linux x86_64, Windows x86_64, and
   macOS arm64.
 - CPU count respects the host/container policy Jolt documents.
-- The descriptor participates in AOT and native-artifact identity where
-  relevant.
+- The descriptor participates in closed-world build and native-artifact
+  identity where relevant.
 
 ### jolt-tcp payoff
 
 Socket layout/constants, native artifacts, and default executor sizing can use
 one tested source of truth.
+
+### Local proposal status
+
+Jolt proposal commits `3105198a` and `34fabb2c` expose the zero-argument
+`jolt.host/target` and replace fuzzy inference with an exact Chez machine-type
+allowlist. The expanded focused suite passes 33/33 checks on Linux with
+`scheme`; Windows x86_64 and macOS arm64 still need native validation.
 
 ## 8. Factor a cross-platform `jolt.net`
 

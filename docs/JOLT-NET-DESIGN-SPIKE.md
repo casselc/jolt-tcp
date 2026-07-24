@@ -4,14 +4,16 @@ Status: design spike, not an API commitment
 Evidence baseline (revalidated 2026-07-23):
 
 - upstream Jolt v0.4.15 at
-  `260a392a795089de3fb5ab700b386a334f01c051`;
-- jolt-tcp at `db609d7e3d041c0940c4fda35049cf1ec35d0810`;
-- jolt-http at `0a85401868337ac27f86d99afadbc847bef49dd3`.
+  `260a392a795089de3fb5ab700b386a334f01c051`, with the local proposal branch
+  `codex/upstream-improvements-1-5` through `287f9022`;
+- jolt-tcp at `5dec956b7dfabeaf57d032be90144873b5df92d4`;
+- jolt-http at `0ee7a634b8b28c9621a6403041bae2daad4c5861`.
 
-The upstream recommendations 1-5 branch was still uncommitted during this
-revalidation. Its proposed `jolt.host/target`, byte-array slice transfers, and
-concurrent-FFI characterization are prerequisites below, not capabilities this
-document assumes have shipped.
+The local proposal now checkpoints public `jolt.host/target`, checked byte-array
+slice transfers, and concurrent-FFI/executor characterization. Target
+classification was independently reviewed and corrected to fail closed at
+`34fabb2c`. The foreign-call probe is evidence only, not a runtime-safety fix,
+and the real monotonic-clock prerequisite is still unimplemented.
 
 ## Conclusion
 
@@ -494,21 +496,22 @@ adding a `jolt.net` prototype to jolt-tcp:
 
 - putting the namespace in jolt-tcp would shadow, rather than validate, its
   intended upstream home;
-- the target facts, checked byte slices, and concurrent-FFI gate are being
-  developed by upstream recommendations 1-5 and were not yet a committed
-  baseline during this spike;
+- target facts and checked byte slices now have committed local proposal
+  checkpoints, while concurrent-FFI remains characterized rather than fixed;
 - a deadline-aware resolver/connector/poller prototype would encode a false
   guarantee while `System/nanoTime` is wall-clock based;
 - only Linux can be executed in the current local environment, while the
   accepted design deliberately includes Win64 handle/layout and macOS SIGPIPE
   behavior.
 
-The first code spike should therefore start from a clean upstream worktree after
-recommendations 1-5 land and the monotonic clock is corrected. Its narrow scope
-is Stage 1 plus the Stage 2 endpoint/resolver value: target-selected layouts,
-copied `getaddrinfo` results, numeric endpoint inspection, immediate structured
-errors, and IPv4/IPv6 loopback tests. It should not yet include a reactor, TLS,
-or a jolt-tcp migration.
+The first code spike can now start from a clean worktree based on local proposal
+commit `287f9022`. Its narrow scope is the non-deadline pieces of Stage 1 plus
+the Stage 2 endpoint/resolver value: target-selected layouts, copied
+`getaddrinfo` results, numeric endpoint inspection, immediate structured
+errors, and IPv4/IPv6 loopback tests. Either implement and characterize a real
+monotonic host clock first, or omit every deadline-bearing API from this slice;
+never substitute the current wall clock. The spike should not yet include a
+poller/reactor, TLS, or a jolt-tcp migration.
 
 ## Staged extraction and migration
 
@@ -538,9 +541,9 @@ Exit: every behavior that will move has a test in its current home.
 - Migrate `jolt.nrepl` and `jolt.mvn-http` close/error helpers without changing
   their public behavior.
 
-The active upstream recommendations 1-5 work is intended to supply several of
-these prerequisites, but this plan treats them as complete only after a clean
-commit and its advertised test matrix.
+The local upstream-fork work supplies the target descriptor and slice-transfer
+prerequisites. It does not supply a real monotonic clock or a concurrent-FFI
+runtime fix; those gates remain explicit.
 
 Exit: no networking caller binds its own `close`/`closesocket` or reads errno
 late; target facts and slice transfers are public and tested; deadline math has
