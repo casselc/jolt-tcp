@@ -4,7 +4,8 @@
   `position` and `limit` (volatiles), mirroring java.nio.ByteBuffer's relative
   read/write model: 0 <= position <= limit <= capacity. Backing by a byte-array
   (rather than raw ffi memory) keeps handler-created buffers GC-managed and
-  leak-safe; the server copies to/from native memory only at the socket edge.
+  leak-safe; jolt.net borrows exact array slices at the socket edge without a
+  native staging buffer.
 
   Charset note: jolt has no java.nio.charset.Charset, so charset arguments are
   charset-NAME strings (e.g. \"UTF-8\"); nil defaults to UTF-8."
@@ -57,7 +58,7 @@
   read-view may share this array); position = old remaining, limit = capacity."
   [b]
   (let [^bytes arr (:arr b) pos (long @(:position b)) lim (long @(:limit b)) n (- lim pos)]
-    (loop [i 0] (when (< i n) (aset arr i (aget arr (+ pos i))) (recur (inc i))))  ; dest<src, forward-safe
+    (System/arraycopy arr pos arr 0 n)
     (vreset! (:position b) n)
     (vreset! (:limit b) (long (:capacity b)))
     b))
@@ -68,7 +69,7 @@
   position. Used by the server to move recv'd bytes into the read buffer."
   [b ^bytes src off len]
   (let [^bytes arr (:arr b) pos (long @(:position b)) off (long off) len (long len)]
-    (loop [i 0] (when (< i len) (aset arr (+ pos i) (aget src (+ off i))) (recur (inc i))))
+    (System/arraycopy src off arr pos len)
     (vreset! (:position b) (+ pos len))
     b))
 
@@ -87,7 +88,7 @@
   (let [^bytes darr (:arr dest) ^bytes sarr (:arr src)
         dpos (long @(:position dest)) spos (long @(:position src))
         n (- (long @(:limit src)) spos)]
-    (loop [i 0] (when (< i n) (aset darr (+ dpos i) (aget sarr (+ spos i))) (recur (inc i))))
+    (System/arraycopy sarr spos darr dpos n)
     (vreset! (:position src) (+ spos n))
     (vreset! (:position dest) (+ dpos n))
     dest))

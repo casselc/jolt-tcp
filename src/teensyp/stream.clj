@@ -22,7 +22,8 @@
     "Block for the next LF-delimited line (trailing CR/LF stripped); nil at EOF
     (a final unterminated fragment is returned once before nil).")
   (conn-send [conn data]
-    "Queue a byte-array or String to be written to the peer.")
+    "Block until a byte-array or String is fully written, or throw its write
+    failure.")
   (conn-close [conn]
     "Close the connection."))
 
@@ -34,15 +35,22 @@
 
 (defn- concat-bytes ^bytes [^bytes a ^bytes b]
   (let [la (alength a) lb (alength b) r (byte-array (+ la lb))]
-    (dotimes [i la] (aset r i (aget a i)))
-    (dotimes [i lb] (aset r (+ la i) (aget b i)))
+    (System/arraycopy a 0 r 0 la)
+    (System/arraycopy b 0 r la lb)
     r))
 
 (defrecord StreamConn [sock in leftover charset]
   Conn
   (conn-recv [_] (a/<!! in))
   (conn-send [_ data]
-    (tcp/write sock (buf/wrap (if (string? data) (.getBytes ^String data charset) data))))
+    (let [outcome
+          @(tcp/write-completion
+            sock
+            (buf/wrap
+             (if (string? data) (.getBytes ^String data charset) data)))]
+      (when (= :failed (:status outcome))
+        (throw (:exception outcome)))
+      nil))
   (conn-close [_] (tcp/close sock))
   (conn-read-line [_]
     (loop []

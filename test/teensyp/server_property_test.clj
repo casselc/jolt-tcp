@@ -110,7 +110,8 @@
       (= r :overrun) :overrun
       :else (let [total (reduce + 0 (map alength r))
                   out (buf/buffer total)]
-              ;; jolt has no System/arraycopy; concatenate through our own Buffer.
+              ;; Concatenate through the public Buffer API; its bulk path uses
+              ;; the fork's overlap-safe System/arraycopy primitive.
               (doseq [^bytes b r] (buf/put-bytes! out b 0 (alength b)))
               (:arr out)))))
 
@@ -188,8 +189,8 @@
   ([_state _ex] nil))
 
 (defn- single-big-write-handler
-  ;; One write far larger than the 65536-byte send buffer, so the reactor must
-  ;; loop send-chunk! and ride out EAGAIN as the socket buffer fills.
+  ;; One write large enough to force partial sends, so the reactor must retain
+  ;; the same mutable Buffer and ride out would-block as the socket buffer fills.
   ([sock]
    (tcp/write sock (buf/wrap @big-payload))
    (tcp/close sock)
@@ -304,11 +305,10 @@
                          {:payload-len (count payload)
                           :got-len (alength ^bytes got)})))))))))))
 
-;; --- 5. a single write larger than the send buffer ------------------------
-;; send-chunk! moves at most :send-buf-size (65536) bytes per call and must loop,
-;; handling partial sends and EAGAIN as the socket buffer fills, while
-;; write-limit accounting is credited back per chunk. Nothing else in the suite
-;; writes more than a few bytes, so that loop was entirely untested.
+;; --- 5. a single large write ------------------------------------------------
+;; The jolt.net byte API may make partial progress or report would-block as the
+;; socket buffer fills. The server must retain the exact Buffer, resume from its
+;; advanced position, and credit write-limit capacity back per send.
 (defn- prop-large-single-write []
   (with-server {:handler single-big-write-handler
                 :write-buffer-size (* 4 1024 1024)}
@@ -332,9 +332,8 @@
                 (when-not (= n (alength ^bytes got))
                   (fail! "server/large-write/length"
                          {:write-size n :got-len (alength ^bytes got)}))
-                ;; Compare as unsigned octets on BOTH sides. jolt.ffi/read-array
-                ;; hands back bytes that read as 128..255, while a locally built
-                ;; byte-array holds -128..-1 for the same wire bytes, so a raw
+                ;; Compare as unsigned octets on BOTH sides. Byte values can be
+                ;; observed with different signed representations, so a raw
                 ;; (= (seq a) (seq b)) reports a spurious mismatch at the first
                 ;; byte above 127. teensyp.buffer masks with 0xff throughout for
                 ;; exactly this reason.
@@ -353,9 +352,10 @@
 ;; This used to be quarantined for a producer/consumer wedge and pre-EOF
 ;; truncation. The stream now closes its channel on peer-eof-notified? (after
 ;; every pre-EOF byte is visible), its finally releases a producer parked on
-;; >!!, flags no longer recursively acquire the socket lock, and fd lifecycle is
-;; reactor-owned and generation-checked. The property is back in the gate after
-;; 30 consecutive 25-case stress runs completed cleanly.
+;; >!!, flags no longer recursively acquire the socket lock, and jolt.net token
+;; identity plus owned-close retirement replace raw-fd lifecycle management. The
+;; property is back in the gate after 30 consecutive 25-case stress runs
+;; completed cleanly.
 (defn- prop-stream-line-framing []
   (with-server {:handler (stream/stream-handler
                           (fn [conn]

@@ -1,6 +1,6 @@
 (ns teensyp.server
-  "A teensyp-compatible TCP server for jolt, built on a single poll(2) reactor
-  thread over non-blocking BSD sockets (teensyp.ffi-net) plus a worker pool.
+  "A teensyp-compatible TCP server for jolt, built on a single jolt.net
+  readiness reactor plus a worker pool.
 
   Same contract as JVM teensyp: a handler is a 3-arity fn
 
@@ -16,13 +16,13 @@
    - All socket I/O happens on the reactor thread, so `try-write` never writes
      immediately — it always returns false and `write` queues. The completion
      callback and write-queue limits behave the same.
-   - `socket-info` returns {:local-address nil :remote-address nil :fd fd}
-     (jolt has no InetSocketAddress; addresses can be added via getpeername later)."
+   - `socket-info` returns transport-neutral numeric endpoint maps
+     `{:host ... :port ... :family ...}` for :local-address and
+     :remote-address, plus the raw :fd as diagnostics only."
   (:refer-clojure :exclude [])
-  (:require [teensyp.ffi-net :as net]
+  (:require [jolt.net :as net]
             [teensyp.buffer :as buf]
-            [teensyp.concurrent :refer [with-lock]]
-            [jolt.ffi :as ffi]))
+            [teensyp.concurrent :refer [with-lock]]))
 
 ;; --- flags (per-connection, on a volatile) ---------------------------------
 (def ^:const WRITING 0x01)
@@ -42,10 +42,32 @@
 ;; socket reports readable forever, which would spin the loop.
 (def ^:const READ-MASK (bit-or PAUSED CLOSED FULL EOF))
 
-(declare handle-close submit-read-handler)
+(declare handle-close submit-read-handler report-error
+         reconcile-registration! reconcile-shutdown-registration!)
 
 ;; --- small helpers ---------------------------------------------------------
 (defn- submit [srv f] (.execute (:executor srv) f))
+
+(defn- task-tracker []
+  (atom {:accepting? true :active #{}}))
+
+(defn- register-task!
+  "Atomically admit `done` while the tracker is open.
+
+  Cleanup closes admission before waiting. That gives it a stable-empty
+  boundary: after the close CAS, the active set can only shrink."
+  [tracker done]
+  (loop []
+    (let [old @tracker]
+      (if-not (:accepting? old)
+        false
+        (if (compare-and-set! tracker old (update old :active conj done))
+          true
+          (recur))))))
+
+(defn- finish-task! [tracker done]
+  (swap! tracker update :active disj done)
+  nil)
 
 (defn- submit-callback
   "Run a write/control completion callback.
@@ -58,7 +80,26 @@
   callbacks — a hard deadlock at exactly `pool-size` concurrent writers.
   Callbacks are short and non-blocking, so the dedicated pool stays available."
   [srv f]
-  (.execute (:callback-executor srv) f))
+  (let [done (promise)
+        tracker (:callback-tasks srv)
+        tracked? (if tracker (register-task! tracker done) false)
+        run (fn []
+              (try (f)
+                   (catch :default e (report-error srv e))
+                   (finally
+                     (deliver done :done)
+                     (when tracked? (finish-task! tracker done)))))]
+    (if (and tracker (not tracked?))
+      ;; Cleanup has already frozen callback admission. There should be no
+      ;; producers after handler quiescence, but an executor rejection or a
+      ;; caller-supplied late callback must still observe completion.
+      (run)
+      (try
+        (.execute (:callback-executor srv) run)
+        (catch :default e
+          (report-error srv e)
+          (run))))
+    done))
 
 (defn- ex-control-queue-full [ctx]
   (ex-info "Control queue full"
@@ -70,11 +111,28 @@
             :flags @(:flags ctx)}))
 (defn- ex-write-queue-full          [] (ex-info "Write queue full" {:err ::write-queue-full}))
 (defn- ex-write-queue-over-capacity [] (ex-info "Write queue over capacity" {:err ::write-queue-over-capacity}))
+(defn- ex-socket-closed [ctx]
+  (let [close-ex (:close-ex ctx)
+        cause (when close-ex @close-ex)]
+    (ex-info "Socket is closed"
+             {:err ::socket-closed
+              :fd (:fd ctx)
+              :generation (:generation ctx)}
+             cause)))
 
-;; PersistentQueue-in-an-atom: single producer (the working thread) + single
-;; consumer (the reactor), each op an atomic CAS/swap, so no lock needed.
-(defn- q-count [qa] (count @qa))
-(defn- q-add!  [qa x] (swap! qa conj x))
+;; PersistentQueue-in-an-atom. Queue admission and removal are each one CAS, so
+;; multiple producers cannot pass a stale count check and collectively exceed
+;; the configured cap.
+;; The cap check and append below share the same queue snapshot.
+(defn- q-offer!
+  [qa cap x]
+  (loop []
+    (let [q @qa]
+      (if (>= (count q) (long cap))
+        false
+        (if (compare-and-set! qa q (conj q x))
+          true
+          (recur))))))
 (defn- q-peek  [qa] (peek @qa))
 (defn- q-poll! [qa]
   (loop [] (let [q @qa] (when (seq q) (if (compare-and-set! qa q (pop q)) (peek q) (recur))))))
@@ -83,58 +141,91 @@
   (loop [] (let [cur @pa] (if (compare-and-set! pa cur #{}) cur (recur)))))
 
 (defn- pending-key [ctx]
-  [(:fd ctx) (:generation ctx)])
+  (:generation ctx))
 
 (defn- mark-pending! [ctx]
   (swap! (:pending (:srv ctx)) conj (pending-key ctx)))
 
-(defn- acquire-wake-gate!
-  "Acquire the short wake ownership gate without depending on thread identity.
+(defn- wake-server!
+  "Wake the reactor after publishing worker-owned flags or pending work.
 
-  Jolt futures can inherit the same Thread/currentThread bookkeeping cell.
-  ReentrantLock consequently may mistake two futures for one reentrant owner,
-  admit both, and later fail unlock with `thread does not own mutex`. An atom
-  CAS is owner-independent; wake!/close! are non-blocking, so contention lasts
-  only for one native call."
-  [gate]
+  jolt.net owns wake admission and descriptor retirement. A worker racing final
+  poller close may observe a closed-poller exception; the state it published is
+  already irrelevant to the stopped server, so that late wake is harmless.
+
+  Do not gate this on running?: after stop revokes ordinary reactor service, the
+  reactor still has to drain writes needed by handlers that were already active.
+  Their publications must wake that bounded shutdown drain too."
+  [srv]
+  (try (net/wake! (:poller srv)) (catch :default _ nil)))
+
+(defn- with-cas-gate
+  "Run `f` under a short owner-independent gate.
+
+  Jolt futures can share host-thread identity, so a ReentrantLock is not a sound
+  ownership boundary here. Gate bodies perform no socket I/O that can block."
+  [gate f]
   (loop []
     (when-not (compare-and-set! gate false true)
       (Thread/yield)
-      (recur))))
-
-(defn- with-wake-gate [srv f]
-  (let [gate (:wake-gate srv)]
-    (acquire-wake-gate! gate)
-    (try
-      (f)
-      (finally
-        (reset! gate false)))))
-
-(defn- wake-server!
-  "Admit and perform one ordinary worker wake under the wake ownership gate.
-
-  The non-blocking pipe write stays inside the gate so cleanup cannot close and
-  allow reuse of wake-w after this call has observed the server as running."
-  [srv]
-  (with-wake-gate
-    srv
-    (fn []
-      (when (and @(:running? srv) @(:wake-open? srv))
-        (net/wake! (:wake-w srv))))))
+      (recur)))
+  (try
+    (f)
+    (finally (reset! gate false))))
 
 (defn- request-stop!
-  "Atomically stop ordinary wake admission and perform the one terminal wake.
-  Returns true only for the caller that transitioned the server to stopped."
+  "Transition to stopped and wake the reactor. Returns true only for the winner.
+
+  The admission phase CAS is the stop linearization boundary. An action that
+  acquired admission first may finish, but no action can acquire admission after
+  the CAS. Public stop still waits for reactor cleanup, hence for every such
+  pre-admitted action."
   [srv]
-  (with-wake-gate
-    srv
+  (with-cas-gate
+    (:accept-gate srv)
     (fn []
-      (when (compare-and-set! (:running? srv) true false)
-        (when @(:wake-open? srv)
-          ;; A failed terminal wake is harmless: poll's finite timeout is the
-          ;; fallback, and cleanup still owns the descriptors.
-          (try (net/wake! (:wake-w srv)) (catch :default _ nil)))
-        true))))
+      (let [admission (:admission srv)]
+        (loop []
+          (let [old @admission]
+            (when (= :open (:phase old))
+              (if (compare-and-set! admission old (assoc old :phase :stopping))
+                (do
+                  (reset! (:running? srv) false)
+                  (try (net/wake! (:poller srv)) (catch :default _ nil))
+                  true)
+                (recur)))))))))
+
+(defn- acquire-running-admission!
+  [srv]
+  (let [admission (:admission srv)]
+    (loop []
+      (let [old @admission]
+        (if-not (= :open (:phase old))
+          false
+          (if (compare-and-set! admission old (update old :active inc))
+            true
+            (recur)))))))
+
+(defn- release-running-admission!
+  [srv]
+  (let [admission (:admission srv)]
+    (loop []
+      (let [old @admission]
+        (if (compare-and-set! admission old (update old :active dec))
+          nil
+          (recur))))))
+
+(defn- with-running-admission
+  "Run one ordinary reactor action only while server admission remains open.
+
+  Admission and stop share one CAS state rather than a thread-owned lock. Jolt
+  futures can share host-thread bookkeeping, so a ReentrantLock may treat two
+  logical tasks as the same reentrant owner and cannot establish this ordering."
+  [srv f]
+  (when (acquire-running-admission! srv)
+    (try
+      (f)
+      (finally (release-running-admission! srv)))))
 
 ;; --- flags -----------------------------------------------------------------
 (defn- flags-of  [ctx] (long @(:flags ctx)))
@@ -157,6 +248,46 @@
         (throw (ex-write-queue-over-capacity))
         (when-not (compare-and-set! (:write-limit ctx) cur (- cur (long n))) (recur))))))
 
+(defn- acquire-write-admission!
+  [ctx]
+  (let [admission (:write-admission ctx)]
+    (loop []
+      (let [old @admission]
+        (if-not (= :open (:phase old))
+          false
+          (if (compare-and-set! admission old (update old :active inc))
+            true
+            (recur)))))))
+
+(defn- release-write-admission!
+  [ctx]
+  (let [admission (:write-admission ctx)]
+    (loop []
+      (let [old @admission]
+        (if (compare-and-set! admission old (update old :active dec))
+          nil
+          (recur))))))
+
+(defn- close-write-admission!
+  "Close write admission and wait for every already-admitted producer to leave.
+
+  A producer only reserves byte credit, performs one queue CAS, and publishes a
+  wake while admitted, so this bounded barrier never waits for socket I/O or a
+  user callback. Once it returns, the reactor can drain and settle the queue
+  without racing a late enqueue."
+  [ctx]
+  (let [admission (:write-admission ctx)]
+    (loop []
+      (let [old @admission]
+        (cond
+          (= :closed (:phase old)) nil
+          (compare-and-set! admission old (assoc old :phase :closed)) nil
+          :else (recur))))
+    (loop []
+      (when (pos? (long (:active @admission)))
+        (Thread/yield)
+        (recur)))))
+
 ;; --- Socket protocol -------------------------------------------------------
 (defprotocol Socket
   "A client socket. See [[write]], [[close]], [[pause-reads]], [[resume-reads]]."
@@ -168,33 +299,63 @@
   (queue-write [socket buffer callback]
     "Queue a Buffer (or ::close) to be written; callback fires when fully written.")
   (socket-info [socket]
-    "Map with :local-address, :remote-address (nil on jolt), and :fd.")
+    "Map with numeric {:host :port :family} local/remote endpoints and diagnostic :fd.")
   (socket-lock [socket]
     "The socket's ReentrantLock, for atomic multi-writes."))
 
-(defrecord Context [srv fd generation lock flags state read-buffer read-view socket-info
-                    write-queue write-limit write-queue-cap
+(defprotocol CompletionSocket
+  "Optional additive SPI for outcome-aware writes.
+
+  Keeping this separate from [[Socket]] preserves existing Socket
+  implementations; only callers of [[write-completion]] need this capability."
+  (queue-write-completion [socket buffer completion]
+    "Queue a Buffer and settle `completion` with a write outcome."))
+
+(defrecord Context [srv socket token interests fd generation lock flags state read-buffer read-view socket-info
+                    write-queue write-limit write-queue-cap write-admission
                     control-queue control-queue-cap close-ex close-callback])
+
+(defn- queue-write-entry!
+  [ctx buffer callback completion]
+  (when-not (acquire-write-admission! ctx)
+    (throw (ex-socket-closed ctx)))
+  (try
+    (let [n (if (instance? teensyp.buffer.Buffer buffer)
+              (long (buf/remaining buffer))
+              0)]
+      (when (pos? n) (reserve-write-limit! ctx n))
+      (if (q-offer! (:write-queue ctx) (:write-queue-cap ctx)
+                    [buffer callback completion])
+        (do
+          (set-flag! ctx WRITING)
+          (mark-pending! ctx)
+          (wake-server! (:srv ctx)))
+        (do
+          ;; Byte credit is reserved before the slot CAS so both limits remain
+          ;; independently linearizable. Losing the slot race returns exactly
+          ;; the credit this attempted entry reserved.
+          (when (pos? n) (swap! (:write-limit ctx) + n))
+          (throw (ex-write-queue-full)))))
+    (finally
+      (release-write-admission! ctx))))
 
 (extend-type Context
   Socket
   (try-write [_ _] false)
   (queue-control [ctx event callback]
-    (when (>= (q-count (:control-queue ctx)) (long (:control-queue-cap ctx)))
+    (when-not (q-offer! (:control-queue ctx) (:control-queue-cap ctx)
+                        [event callback])
       (throw (ex-control-queue-full ctx)))
-    (q-add! (:control-queue ctx) [event callback])
     (mark-pending! ctx)
     (wake-server! (:srv ctx)))
   (queue-write [ctx buffer callback]
-    (when (>= (q-count (:write-queue ctx)) (long (:write-queue-cap ctx)))
-      (throw (ex-write-queue-full)))
-    (when (instance? teensyp.buffer.Buffer buffer)
-      (reserve-write-limit! ctx (buf/remaining buffer)))
-    (q-add! (:write-queue ctx) [buffer callback])
-    (set-flag! ctx WRITING)
-    (wake-server! (:srv ctx)))
+    (queue-write-entry! ctx buffer callback nil))
   (socket-info [ctx] (:socket-info ctx))
-  (socket-lock [ctx] (:lock ctx)))
+  (socket-lock [ctx] (:lock ctx))
+
+  CompletionSocket
+  (queue-write-completion [ctx buffer completion]
+    (queue-write-entry! ctx buffer nil completion)))
 
 ;; --- public convenience fns (identical surface to JVM teensyp) -------------
 (defn write
@@ -207,10 +368,33 @@
        (when callback (callback))
        (queue-write socket buffer callback)))))
 
+(defn write-completion
+  "Write a Buffer and return a promise that settles exactly once.
+
+  A successful write delivers `{:status :written}` after every byte has been
+  accepted by the native socket. A connection/write failure delivers
+  `{:status :failed :exception ex}` before the connection is retired. Queue
+  admission errors remain synchronous exceptions. When admission finds an
+  already-closed socket, the first recorded close failure is retained as the
+  synchronous `::socket-closed` exception's cause.
+
+  This is the failure-aware completion surface for blocking adapters. The
+  optional zero-arg callback accepted by [[write]] remains success-only for
+  backward compatibility."
+  [socket buffer]
+  (let [completion (promise)]
+    (with-lock (socket-lock socket)
+      (if (try-write socket buffer)
+        (deliver completion {:status :written})
+        (queue-write-completion socket buffer completion)))
+    completion))
+
 (defn close
   "Queue the socket to be closed. Optional zero-arg callback fires after close."
-  ([socket]          (queue-write socket ::close nil))
-  ([socket callback] (queue-write socket ::close callback)))
+  ([socket] (close socket nil))
+  ([socket callback]
+   (with-lock (socket-lock socket)
+     (queue-write socket ::close callback))))
 
 (defn pause-reads
   "Pause reads for this socket (control event, limited by :control-queue-size)."
@@ -261,20 +445,18 @@
       (buf/set-position! b keep))))
 
 (defn- recv-into!
-  "recv into read-buffer's free space. Returns the number of bytes received
-  (>=0), or :eof / :error. `:eof` is kept distinct from `:error` because a peer
+  "Read into read-buffer's free space through jolt.net. Returns a positive byte
+  count, ::net/eof, or ::net/would-block. EOF remains distinct because a peer
   that half-closes its write side is still waiting for a response."
-  [srv ctx]
+  [ctx]
   (let [rb (:read-buffer ctx) cap (long (buf/capacity rb)) pos (buf/position rb)
         space (- cap pos)]
     (if (<= space 0)
       0
-      (let [nb (:recv-buf srv) r (net/recv* (:fd ctx) nb space)]
-        (cond
-          (= r :eof)    :eof
-          (= r :error)  :error
-          (= r :eagain) 0
-          :else (do (buf/put-bytes! rb (jolt.ffi/read-array nb r) 0 r) (long r)))))))
+      (let [n (net/try-read-bytes! (:socket ctx) (:arr rb) pos space)]
+        (if (number? n)
+          (do (buf/set-position! rb (+ pos (long n))) (long n))
+          n)))))
 
 (defn- drop-consumed!
   "Drop the bytes the handler consumed from the read buffer and rebase the
@@ -306,6 +488,34 @@
   (mark-pending! ctx)
   (wake-server! (:srv ctx)))
 
+(defn- submit-marked-handler!
+  "Submit one accept/read handler arity whose WORKING reservation is published.
+
+  Executor rejection is synchronous and means the task will never run its
+  `finally`. Treat it like any other handler failure, but clear WORKING here so
+  the reactor can retire the connection and stop cannot wedge forever waiting
+  for a worker that was never admitted."
+  [srv ctx f]
+  (try
+    (submit srv
+            (fn []
+              (try
+                (f)
+                (catch :default e (handle-close ctx e))
+                (finally (finish-work! ctx)))))
+    true
+    (catch :default e
+      (report-error srv e)
+      (handle-close ctx e)
+      (finish-work! ctx)
+      false)))
+
+(defn- submit-handler!
+  "Publish WORKING and submit one read handler arity."
+  [srv ctx f]
+  (set-flag! ctx WORKING)
+  (submit-marked-handler! srv ctx f))
+
 (defn- submit-read-handler [srv ctx]
   (update-read-view! ctx)
   ;; The view now shows every byte that arrived before EOF, so this is the exact
@@ -315,43 +525,81 @@
   ;; WORKING (set immediately below) is what stops a second invocation being
   ;; scheduled for the same notification.
   (when (flag? ctx EOF) (set-flag! ctx EOF-SEEN))
-  (set-flag! ctx WORKING)
-  (submit srv
-          (fn []
-            (try (vswap! (:state ctx) (:handler (:opts srv)) ctx (:read-view ctx))
-                 (catch :default e (handle-close ctx e))
-                 (finally (finish-work! ctx))))))
+  (submit-handler!
+   srv ctx
+   #(vswap! (:state ctx) (:handler (:opts srv)) ctx (:read-view ctx))))
 
 (defn- send-chunk!
-  "Send up to send-buf-size bytes of `item`'s remaining from its position.
-  Returns bytes sent (advancing item's position), :eagain, or :error."
-  [srv ctx item]
-  (let [nb (:send-buf srv) chunk (long (:send-buf-size srv))
-        rem (buf/remaining item) n (min rem chunk)
-        ^bytes arr (:arr item) pos (buf/position item)
-        chunkbytes (java.util.Arrays/copyOfRange arr (int pos) (int (+ pos n)))]
-    (jolt.ffi/write-array nb chunkbytes)
-    (let [sent (net/send* (:fd ctx) nb n)]
-      (if (number? sent)
-        (do (buf/set-position! item (+ pos (long sent))) sent)
-        sent))))
+  "Send `item` directly from its mutable backing array. The exact Buffer remains
+  queued and therefore owned by the server until its completion callback fires."
+  [ctx item]
+  (let [pos (buf/position item)
+        sent (net/try-write-bytes! (:socket ctx) (:arr item)
+                                   pos (buf/remaining item))]
+    (if (number? sent)
+      (do (buf/set-position! item (+ pos (long sent))) sent)
+      sent)))
 
 ;; --- reactor-side event handlers -------------------------------------------
+(defn- remember-close-ex!
+  "Retain the first connection failure for close arity and late-write causes."
+  [ctx ex]
+  (swap! (:close-ex ctx) (fn [current] (or current ex))))
+
 (defn- handle-close
   "Request closure and mark CLOSED. Safe to call from a worker or the reactor.
 
-  Deliberately does not call close(2): only handle-pending-close on the reactor
-  owns the raw fd. Otherwise POSIX may reuse the number while stale work still
-  retains this context, and a later close from that work can kill the replacement
-  connection."
+  Deliberately does not close the owned socket: only handle-pending-close on the
+  reactor retires its current registration and handle."
   ([ctx ex] (handle-close ctx ex nil))
   ([ctx ex callback]
-   (vswap! (:close-ex ctx) (fn [c] (or c ex)))
+   (remember-close-ex! ctx ex)
    (when callback
      (swap! (:close-callback ctx) (fn [c] (or c callback))))
+   ;; Closing write admission before publishing CLOSED prevents a producer that
+   ;; observed the old flags from enqueueing after failure settlement drains the
+   ;; queue.
+   (close-write-admission! ctx)
    (set-flag! ctx CLOSED)
    (mark-pending! ctx)
    (wake-server! (:srv ctx))))
+
+(defn- ex-write-aborted [ctx]
+  (ex-info "Queued write did not complete before socket close"
+           {:err ::write-aborted
+            :fd (:fd ctx)
+            :generation (:generation ctx)}))
+
+(defn- fail-pending-writes!
+  "Settle every queued outcome as failed and return all reserved byte credit.
+
+  Legacy zero-arg callbacks remain success-only and are deliberately not run.
+  A queued close callback is retained for the ordinary close boundary."
+  [srv ctx ex]
+  (let [failure {:status :failed
+                 :exception (or ex (ex-write-aborted ctx))}]
+    (unset-flag! ctx WRITING)
+    (loop []
+      (when-some [[item callback completion] (q-poll! (:write-queue ctx))]
+        (if (= item ::close)
+          (when callback
+            (swap! (:close-callback ctx) (fn [c] (or c callback))))
+          (do
+            (when (instance? teensyp.buffer.Buffer item)
+              (swap! (:write-limit ctx) + (long (buf/remaining item))))
+            (when completion (deliver completion failure))))
+        (recur)))))
+
+(defn- fail-connection!
+  "Reactor-owned connection failure path: revoke writes, settle outcomes, close."
+  [srv ctx ex]
+  ;; Publish the cause before write admission becomes closed. A concurrent
+  ;; write-completion then throws synchronously, as documented, while still
+  ;; retaining this first failure through ex-cause.
+  (remember-close-ex! ctx ex)
+  (close-write-admission! ctx)
+  (fail-pending-writes! srv ctx ex)
+  (handle-close ctx ex))
 
 (defn- handle-eof!
   "The peer half-closed its write side: no more data is coming, but it is still
@@ -391,31 +639,39 @@
       (when-not working?
         (drop-consumed! ctx))
       (when (< (buf/position rb) (long (buf/capacity rb)))
-        (let [n (recv-into! srv ctx)]
+        (let [n (recv-into! ctx)]
           (cond
-            (= n :error) (handle-close ctx nil)
-            (= n :eof)   (handle-eof! srv ctx)
-            (= n 0)      nil
+            (net/eof? n)         (handle-eof! srv ctx)
+            (net/would-block? n) nil
+            (= n 0)              nil
             :else (do (when (>= (buf/position rb) (long (buf/capacity rb))) (set-flag! ctx FULL))
                       (when-not working? (submit-read-handler srv ctx)))))))))
 
 (defn- handle-write [srv ctx]
   (unset-flag! ctx WRITING)
   (loop []
-    (when-some [[item callback] (q-peek (:write-queue ctx))]
+    (when-some [[item callback completion] (q-peek (:write-queue ctx))]
       (if (= item ::close)
         (do (q-poll! (:write-queue ctx))
             (handle-close ctx nil callback))
         (if (zero? (buf/remaining item))
-          (do (q-poll! (:write-queue ctx)) (when callback (submit-callback srv callback)) (recur))
-          (let [r (send-chunk! srv ctx item)]
+          (do
+            (q-poll! (:write-queue ctx))
+            (when callback (submit-callback srv callback))
+            (when completion (deliver completion {:status :written}))
+            (recur))
+          (let [r (send-chunk! ctx item)]
             (cond
-              (= r :eagain) (set-flag! ctx WRITING)
-              (= r :error)  (handle-close ctx nil)
+              (net/would-block? r) (set-flag! ctx WRITING)
               :else (do (swap! (:write-limit ctx) + (long r))
                         (if (buf/has-remaining? item)
                           (set-flag! ctx WRITING)
-                          (do (q-poll! (:write-queue ctx)) (when callback (submit-callback srv callback)) (recur))))))))))
+                          (do
+                            (q-poll! (:write-queue ctx))
+                            (when callback (submit-callback srv callback))
+                            (when completion
+                              (deliver completion {:status :written}))
+                            (recur))))))))))
   nil)
 
 (defn- has-read-data? [ctx]
@@ -441,22 +697,55 @@
           (submit-read-handler srv ctx)))))
 
 (defn- current-context?
-  "True only when ctx is still the registered generation for its raw fd."
+  "True only when ctx is still the registered socket ownership generation."
   [srv ctx]
-  (let [current (get @(:conns srv) (:fd ctx))]
-    (and current (= (:generation current) (:generation ctx)))))
+  (identical? ctx (get @(:conns srv) (:generation ctx))))
+
+(defn- track-task!
+  "Submit f and retain only its active completion promise.
+
+  Cleanup freezes admission before awaiting the active set, so completed server
+  history is neither retained nor repeatedly traversed."
+  [srv executor tracker f]
+  (let [done (promise)
+        tracked? (register-task! tracker done)
+        run (fn []
+              (try (f)
+                   (catch :default e (report-error srv e))
+                   (finally
+                     (deliver done :done)
+                     (when tracked? (finish-task! tracker done)))))]
+    (if-not tracked?
+      (run)
+      (try
+        (.execute executor run)
+        (catch :default e
+          ;; A caller-supplied executor may have been shut down independently.
+          ;; Report that ownership violation, but preserve the close/callback
+          ;; contract and completion boundary instead of leaking a promise.
+          (report-error srv e)
+          (run))))
+    done))
+
+(defn- submit-handler-close! [srv ctx]
+  (track-task! srv (:executor srv) (:handler-closes srv)
+               #((:handler (:opts srv)) @(:state ctx) @(:close-ex ctx))))
 
 (defn- handle-pending-close
   "Finalize one current connection on the reactor: remove its identity before
-  close(2), close exactly once, then schedule the public close callbacks."
+  closing its owned socket, then schedule public close callbacks."
   [srv ctx]
   (when (and (flag? ctx CLOSED) (not (flag? ctx WORKING))
              (current-context? srv ctx))
-    (swap! (:conns srv) dissoc (:fd ctx))
-    (net/close! (:fd ctx))
+    (fail-pending-writes! srv ctx @(:close-ex ctx))
+    (swap! (:conns srv) dissoc (:generation ctx))
+    (try (net/remove-registration! (:poller srv) @(:token ctx))
+         (catch :default e (report-error srv e)))
+    (try (net/close! (:socket ctx))
+         (catch :default e (report-error srv e)))
     (when-let [callback @(:close-callback ctx)]
       (submit-callback srv callback))
-    (submit srv (fn [] ((:handler (:opts srv)) @(:state ctx) @(:close-ex ctx))))))
+    (submit-handler-close! srv ctx)))
 
 (defn- handle-control [srv ctx]
   (loop [resumed? false]
@@ -486,12 +775,23 @@
         true)))
 
 ;; --- accept + context creation ---------------------------------------------
-(defn- new-context [srv fd]
+(defn- portable-endpoint
+  "Remove jolt.net's implementation namespace from the public TCP boundary."
+  [endpoint]
+  {:host (:jolt.net/host endpoint)
+   :port (:jolt.net/port endpoint)
+   :family (:jolt.net/family endpoint)})
+
+(defn- new-context [srv socket token]
   (let [{:keys [read-buffer-size write-buffer-size write-queue-size control-queue-size]} (:opts srv)
         rb (buf/buffer read-buffer-size)
-        generation (swap! (:next-generation srv) inc)]
+        generation (:jolt.net/generation token)
+        fd (net/native-handle socket)
+        local (portable-endpoint (net/local-endpoint socket))
+        remote (portable-endpoint (net/peer-endpoint socket))]
     (map->Context
-     {:srv srv :fd fd :generation generation
+     {:srv srv :socket socket :token (atom token) :interests (atom #{:read})
+      :fd fd :generation generation
       :lock (java.util.concurrent.locks.ReentrantLock.)
       :flags (atom 0) :state (volatile! nil)
       ;; read-view starts empty (position 0, limit 0), like teensyp's
@@ -499,31 +799,91 @@
       ;; handle-pending-read's (> rb.position rv.limit) guard never fire when a
       ;; read arrives while the accept arity is still WORKING.
       :read-buffer rb :read-view (buf/flip (buf/duplicate rb))
-      :socket-info {:local-address nil :remote-address nil :fd fd}
+      :socket-info {:local-address local
+                    :remote-address remote
+                    :fd fd}
       :write-queue (atom clojure.lang.PersistentQueue/EMPTY) :write-limit (atom write-buffer-size)
       :write-queue-cap write-queue-size
+      :write-admission (atom {:phase :open :active 0})
       :control-queue (atom clojure.lang.PersistentQueue/EMPTY) :control-queue-cap control-queue-size
-      :close-ex (volatile! nil)
+      :close-ex (atom nil)
       :close-callback (atom nil)})))
 
-(defn- do-accept [srv listen-fd]
-  (loop []
-    (let [fd (net/accept* listen-fd)]
-      (when (number? fd)
-        (let [ctx (new-context srv fd)]
-          (swap! (:conns srv) assoc fd ctx)
-          (set-flag! ctx WORKING)
-          (submit srv (fn []
-                        (try (vreset! (:state ctx) ((:handler (:opts srv)) ctx))
-                             (catch :default e (handle-close ctx e))
-                             (finally (finish-work! ctx)))))
-          (recur))))))
+(defn- accepting? [srv]
+  (and @(:running? srv)
+       (= :open (:phase @(:admission srv)))))
+
+(defn- with-accept-publication
+  "Run one accept publication wholly before or after the stop phase CAS."
+  [srv f]
+  (with-cas-gate (:accept-gate srv)
+                 #(when (accepting? srv) (f))))
+
+(defn- discard-accepted!
+  [srv socket token]
+  (when token
+    (try (net/remove-registration! (:poller srv) token)
+         (catch :default _ nil)))
+  (try (net/close! socket) (catch :default _ nil))
+  nil)
+
+(defn- admit-accepted!
+  "Register and publish one accepted socket, rolling back every pre-publication
+  resource if registration, metadata construction, or stop cancellation wins."
+  [srv socket]
+  (if-not (accepting? srv)
+    (do (discard-accepted! srv socket nil) false)
+    (let [token* (atom nil)
+          published? (atom false)]
+      (try
+        (let [token (net/register! (:poller srv) socket #{:read})]
+          (reset! token* token)
+          (let [ctx (new-context srv socket token)]
+            (boolean
+             (when-let
+              [published-ctx
+               (with-accept-publication
+                 srv
+                 (fn []
+                   ;; Registration and complete diagnostic metadata precede
+                   ;; exposure to either the registry or the accept handler.
+                   ;;
+                   ;; Reserve handler ownership before publishing the Context.
+                   ;; Stop may linearize as soon as this short gate is released,
+                   ;; so it must never observe the newly visible Context as idle
+                   ;; in the gap before executor admission.
+                   (set-flag! ctx WORKING)
+                   (swap! (:conns srv) assoc (:generation ctx) ctx)
+                   (reset! published? true)
+                   ctx))]
+               ;; Executor.execute is deliberately outside accept-gate. Executor
+               ;; permits a legal direct implementation that invokes the handler
+               ;; inline; that handler may request stop, which must be able to
+               ;; acquire the same gate and reach public stop's bounded wait.
+               (submit-marked-handler!
+                srv published-ctx
+                #(vreset! (:state published-ctx)
+                          ((:handler (:opts srv)) published-ctx)))))))
+        (finally
+          (when-not @published?
+            (discard-accepted! srv socket @token*)))))))
+
+(defn- do-accept [srv]
+  (let [batch-size (long (:accept-batch-size (:opts srv)))]
+    (loop [accepted 0]
+      (when (and (< accepted batch-size) (accepting? srv))
+        (let [socket (net/try-accept (:listener srv) {:no-delay? true})]
+          (when-not (net/would-block? socket)
+            (admit-accepted! srv socket)
+            (recur (inc accepted))))))))
 
 ;; --- interest + reactor loop -----------------------------------------------
 (defn- interest [ctx]
   (let [f (flags-of ctx)]
-    (bit-or (if (zero? (bit-and f READ-MASK)) net/POLLIN 0)
-            (if (and (not (zero? (bit-and f WRITING))) (zero? (bit-and f CLOSED))) net/POLLOUT 0))))
+    (cond-> #{}
+      (zero? (bit-and f READ-MASK)) (conj :read)
+      (and (not (zero? (bit-and f WRITING)))
+           (zero? (bit-and f CLOSED))) (conj :write))))
 
 (defn- default-error-logger [e]
   (binding [*out* *err*] (prn e)))
@@ -540,71 +900,145 @@
   [srv f]
   (try (f) (catch :default e (report-error srv e))))
 
-(defn- retire-wake-w!
-  "Close wake-w exactly once under the same gate used by all wake writers.
+(defn- freeze-and-await-tasks!
+  "Close task admission, then wait until the active set is stably empty."
+  [tracker]
+  (swap! tracker assoc :accepting? false)
+  (loop []
+    (let [active (:active @tracker)]
+      (when (seq active)
+        (doseq [done active] (deref done))
+        (recur))))
+  nil)
 
-  wake-open? is cleared before close, so a close failure cannot admit another
-  write. The read end remains open until after this returns, preventing SIGPIPE
-  for the wake that may already hold the gate."
+(defn- handle-shutdown-controls!
+  "Complete control operations published by an already-active handler.
+
+  Resume changes the flag but deliberately does not submit a read arity: stop
+  has revoked new application work. Completion callbacks still run because an
+  active handler is allowed to use one as its release fence."
+  [srv ctx]
+  (loop []
+    (when-some [[event callback] (q-poll! (:control-queue ctx))]
+      (case event
+        ::pause-reads  (set-flag! ctx PAUSED)
+        ::resume-reads (unset-flag! ctx PAUSED))
+      (when callback (submit-callback srv callback))
+      (recur))))
+
+(defn- prepare-shutdown-active!
+  "Publish write interests and control callbacks for currently active handlers.
+
+  This is reactor-only. It intentionally omits handle-pending-read and
+  handle-pending-close: shutdown must not admit a new read arity, and socket
+  retirement remains the cleanup phase after every active arity returns."
   [srv]
-  (let [close-error (volatile! nil)]
-    (with-wake-gate
-      srv
-      (fn []
-        (reset! (:running? srv) false)
-        (when (compare-and-set! (:wake-open? srv) true false)
-          (try (net/close! (:wake-w srv))
-               (catch :default e (vreset! close-error e))))))
-    ;; Never call user logging code while holding the ownership gate.
-    (when-let [e @close-error]
-      (report-error srv e))))
+  (drain-pending! (:pending srv))
+  (doseq [ctx (vals @(:conns srv))]
+    (when (and (flag? ctx WORKING) (current-context? srv ctx))
+      (try
+        (handle-shutdown-controls! srv ctx)
+        (reconcile-shutdown-registration! srv ctx)
+        (catch :default e
+          (report-error srv e)
+          (try
+            (fail-connection! srv ctx e)
+            (reconcile-shutdown-registration! srv ctx)
+            (catch :default _ nil)))))))
+
+(defn- handle-shutdown-events!
+  "Service only writes needed by an already-active handler.
+
+  Read/hangup readiness is intentionally ignored: delivering it would schedule
+  new application work after stop. A write failure is still contained to the
+  connection by the same failure path used by the ordinary reactor."
+  [srv ctx events]
+  (try
+    (when (and (flag? ctx WORKING)
+               (not (flag? ctx CLOSED))
+               (contains? events :write))
+      (handle-write srv ctx))
+    (reconcile-shutdown-registration! srv ctx)
+    (catch :default e
+      (report-error srv e)
+      (try
+        (fail-connection! srv ctx e)
+        (reconcile-shutdown-registration! srv ctx)
+        (catch :default _ nil)))))
+
+(defn- quiesce-handlers!
+  "Drain writes/control callbacks needed by active accept/read arities until no
+  handler owns a Context.
+
+  Stop has already retired the listener. The reactor remains the sole
+  registration and socket-I/O owner during this phase, but it neither accepts
+  nor dispatches new read arities. This prevents a handler blocked on its own
+  write callback from deadlocking cleanup."
+  [srv]
+  (loop []
+    (when (some #(flag? % WORKING) (vals @(:conns srv)))
+      (prepare-shutdown-active! srv)
+      (doseq [{:keys [token events]} (net/await-ready (:poller srv) 1000)]
+        (when-let [ctx (get @(:conns srv)
+                            (:jolt.net/generation token))]
+          (when (= token @(:token ctx))
+            (handle-shutdown-events! srv ctx events))))
+      (recur))))
+
+(defn- shutdown-and-await! [executor]
+  (.shutdown executor)
+  (loop []
+    (when-not (.isTerminated executor)
+      (Thread/yield)
+      (recur))))
+
+(defn- retire-registration!
+  [srv token socket]
+  (when token
+    (cleanup-call srv #(net/remove-registration! (:poller srv) token)))
+  (cleanup-call srv #(net/close! socket)))
 
 (defn- cleanup-server!
-  "Release every resource owned by a fully constructed server, exactly once.
-
-  The reactor is the normal caller (from its outermost `finally`). The guard
-  also makes this safe for the narrow failure window between constructing the
-  server state and starting its future."
+  "Stop exposure, quiesce handlers, retire registrations and sockets, run and
+  await close arities, close the poller and owned executors, then publish stop."
   [srv]
   (when (compare-and-set! (:cleanup-started? srv) false true)
     (try
-      ;; Retire the write end before any other cleanup. Every admitted ordinary
-      ;; or terminal wake has completed before this close can run, and later
-      ;; workers observe wake-open? false under the same gate.
-      (retire-wake-w! srv)
+      (reset! (:running? srv) false)
 
-      ;; Stop accepting before releasing any reactor storage. stop-server only
-      ;; flips running? and wakes poll; the reactor owns all raw descriptors.
-      (cleanup-call srv #(net/close! (:listen-fd srv)))
+      ;; The reactor is the only caller of registration mutations. Stop listener
+      ;; exposure first, while the poller remains available to active workers.
+      (retire-registration! srv @(:listener-token srv) (:listener srv))
 
-      ;; Remove identities before close(2), just like the ordinary connection
-      ;; finalizer, so late worker work cannot act on an fd that POSIX reuses.
+      (quiesce-handlers! srv)
+
       (let [ctxs (vals @(:conns srv))]
         (reset! (:conns srv) {})
         (doseq [ctx ctxs]
-          (cleanup-call srv #(net/close! (:fd ctx)))
-          (cleanup-call srv #((:handler (:opts srv)) @(:state ctx) nil))))
+          (handle-close ctx @(:close-ex ctx))
+          (fail-pending-writes! srv ctx @(:close-ex ctx))
+          (retire-registration! srv @(:token ctx) (:socket ctx))
+          (when-let [callback @(:close-callback ctx)]
+            (submit-callback srv callback))
+          (submit-handler-close! srv ctx)))
 
-      (cleanup-call srv #(net/close! (:wake-r srv)))
-      (cleanup-call srv #(ffi/free (:recv-buf srv)))
-      (cleanup-call srv #(ffi/free (:send-buf srv)))
+      ;; A close arity is last in its handler sequence and stop does not complete
+      ;; until every one has returned, including closes scheduled before stop.
+      (freeze-and-await-tasks! (:handler-closes srv))
+      (freeze-and-await-tasks! (:callback-tasks srv))
 
-      ;; Pools created by the server are always reaped. Caller-supplied pools
-      ;; are borrowed unless their corresponding explicit shutdown option opted
-      ;; them into server ownership.
+      (cleanup-call srv #(net/close! (:poller srv)))
+
       (let [shutdown-ex? (:shutdown-executor? srv)
             shutdown-cb? (:shutdown-callback-executor? srv)]
         (when shutdown-ex?
-          (cleanup-call srv #(.shutdown (:executor srv))))
+          (cleanup-call srv #(shutdown-and-await! (:executor srv))))
         (when (and shutdown-cb?
                    (not (and shutdown-ex?
                              (identical? (:executor srv)
                                          (:callback-executor srv)))))
-          (cleanup-call srv #(.shutdown (:callback-executor srv)))))
+          (cleanup-call srv #(shutdown-and-await! (:callback-executor srv)))))
       (finally
-        ;; Completion means descriptors, native buffers, and executor shutdown
-        ;; requests have all been handled. Always release waiters, even if a
-        ;; host cleanup primitive itself failed.
         (deliver (:stopped srv) :stopped)))))
 
 (defn- cleanup-startup!
@@ -613,27 +1047,55 @@
   shutdown opt-in authorizes cleanup here as well as after a successful start."
   [state]
   (when (compare-and-set! (:cleanup-started? state) false true)
-    (doseq [fd (remove nil? [(:listen-fd state) (:wake-r state) (:wake-w state)])]
-      (try (net/close! fd) (catch :default _ nil)))
-    (doseq [ptr (remove nil? [(:recv-buf state) (:send-buf state)])]
-      (try (ffi/free ptr) (catch :default _ nil)))
+    (doseq [owned (remove nil? [(:listener state) (:poller state)])]
+      (try (net/close! owned) (catch :default _ nil)))
     (when (:shutdown-executor? state)
-      (try (.shutdown (:executor state)) (catch :default _ nil)))
+      (try (shutdown-and-await! (:executor state)) (catch :default _ nil)))
     (when (and (:shutdown-callback-executor? state)
                (not (and (:shutdown-executor? state)
                          (identical? (:executor state)
                                      (:callback-executor state)))))
-      (try (.shutdown (:callback-executor state)) (catch :default _ nil)))))
+      (try (shutdown-and-await! (:callback-executor state))
+           (catch :default _ nil)))))
 
 (defn- run-after-reactor-start!
   "Run `f` only after construction commits the server handoff.
 
   A constructor failure after future-call returns delivers :abort instead. The
   catch path then owns cleanup, and the scheduled future must not touch the
-  descriptors or native buffers it just released."
+  owned sockets or poller it just released."
   [reactor-start f]
   (when (= :start (deref reactor-start))
     (f)))
+
+(defn- reconcile-registration!
+  "Apply one Context's flag-derived interest set. Reactor thread only."
+  [srv ctx]
+  (when (and (current-context? srv ctx) (not (flag? ctx CLOSED)))
+    (let [desired (interest ctx)]
+      (when (not= desired @(:interests ctx))
+        (let [token (net/update-registration! (:poller srv)
+                                              @(:token ctx) desired)]
+          (reset! (:token ctx) token)
+          (reset! (:interests ctx) desired))))))
+
+(defn- reconcile-shutdown-registration!
+  "During stop, retain only write readiness needed by an active handler.
+
+  Removing :read is both the admission boundary (no new reads after stop) and a
+  liveness detail: unread data or EOF is level-triggered, so leaving :read
+  registered while intentionally ignoring it would make the shutdown loop spin."
+  [srv ctx]
+  (when (current-context? srv ctx)
+    (let [desired (if (and (not (flag? ctx CLOSED))
+                           (flag? ctx WRITING))
+                    #{:write}
+                    #{})]
+      (when (not= desired @(:interests ctx))
+        (let [token (net/update-registration! (:poller srv)
+                                              @(:token ctx) desired)]
+          (reset! (:token ctx) token)
+          (reset! (:interests ctx) desired))))))
 
 (defn- handle-conn-events
   "Run one connection's poll events, containing any failure to that connection.
@@ -642,69 +1104,69 @@
   whole server: the future swallowed it, `running?` stayed true, and every
   connection — existing and new — stopped being served with no log. One bad
   connection must only ever cost that connection."
-  [srv ctx re]
+  [srv ctx events]
   (try
     (when-not (flag? ctx CLOSED)
-      (when (pos? (bit-and re (bit-or net/POLLIN net/POLLHUP net/POLLERR)))
+      ;; Read first when POLLIN and HUP arrive together. try-read drains the final
+      ;; bytes before recording EOF, so hangup never discards a request tail.
+      (when (or (contains? events :read)
+                (contains? events :hangup)
+                (contains? events :error))
         (handle-read srv ctx))
       (when (and (not (flag? ctx CLOSED))
-                 (pos? (bit-and re net/POLLOUT)))
-        (handle-write srv ctx)))
+                 (contains? events :write))
+        (handle-write srv ctx))
+      (reconcile-registration! srv ctx))
     (catch :default e
       (report-error srv e)
-      (try (handle-close ctx e) (catch :default _ nil)))))
+      (try (fail-connection! srv ctx e) (catch :default _ nil)))))
+
+(defn- process-pending! [srv]
+  (doseq [generation (drain-pending! (:pending srv))]
+    (when-let [ctx (get @(:conns srv) generation)]
+      (try
+        (let [handled? (handle-pending srv ctx)]
+          ;; WORKING only serializes handler arities. It must not defer readiness
+          ;; changes: a handler is allowed to wait for its own write callback,
+          ;; which requires the reactor to enable :write while that handler is
+          ;; still running.
+          (reconcile-registration! srv ctx)
+          (when-not handled?
+            (swap! (:pending srv) conj generation)))
+        (catch :default e
+          (report-error srv e)
+          (try (fail-connection! srv ctx e) (catch :default _ nil)))))))
 
 (defn- reactor-loop [srv]
-  (let [listen-fd (:listen-fd srv)
-        wake-r    (:wake-r srv)
-        running?  (:running? srv)]
-    (try
+  (try
+    ;; Registration is performed by the reactor before run-server exposes its
+    ;; handle. Every subsequent register/update/remove happens on this thread.
+    (let [listener-token (net/register! (:poller srv) (:listener srv) #{:read})]
+      (reset! (:listener-token srv) listener-token)
+      (deliver (:reactor-ready srv) {:ok true})
       (loop []
-        (when @running?
-          (let [ctxs (vec (remove #(flag? % CLOSED) (vals @(:conns srv))))
-                n    (+ 2 (count ctxs))
-                arr  (net/alloc-pollfds n)]
-            (try
-              (net/set-pollfd! arr 0 listen-fd net/POLLIN)
-              (net/set-pollfd! arr 1 wake-r    net/POLLIN)
-              (dotimes [i (count ctxs)]
-                (net/set-pollfd! arr (+ i 2) (:fd (nth ctxs i)) (interest (nth ctxs i))))
-              ;; The self-pipe (wake-r) makes poll return promptly on any state
-              ;; change; the 1s timeout is a defensive safety net against a missed
-              ;; wake, not the primary mechanism.
-              (when (pos? (net/poll* arr n 1000))
-                (when (pos? (bit-and (net/pollfd-revents arr 0) net/POLLIN))
-                  (try (do-accept srv listen-fd)
-                       (catch :default e (report-error srv e))))
-                (when (pos? (bit-and (net/pollfd-revents arr 1) net/POLLIN))
-                  (net/drain! wake-r))
-                (dotimes [i (count ctxs)]
-                  (let [ctx (nth ctxs i) re (net/pollfd-revents arr (+ i 2))]
-                    (when (pos? re)
-                      (handle-conn-events srv ctx re)))))
-              ;; Last-resort guard: whatever else goes wrong in an iteration, the
-              ;; reactor keeps running rather than dying silently.
-              (catch :default e (report-error srv e))
-              (finally (ffi/free arr)))
-            (doseq [[fd generation :as key] (drain-pending! (:pending srv))]
-              (when-let [ctx (get @(:conns srv) fd)]
-                ;; A stale worker/control event may arrive after POSIX has reused
-                ;; its fd. Drop it unless it names the currently registered
-                ;; generation; fd alone is never a connection identity.
-                (when (= generation (:generation ctx))
-                  (try
-                    (when-not (handle-pending srv ctx)
-                      (swap! (:pending srv) conj key))
-                    (catch :default e
-                      (report-error srv e)
-                      (try (handle-close ctx e) (catch :default _ nil)))))))
-            (recur))))
-      (catch :default e
-        ;; Errors outside an individual iteration are still visible, and the
-        ;; outer finally remains the non-negotiable lifecycle boundary.
-        (report-error srv e))
-      (finally
-        (cleanup-server! srv)))))
+        (when @(:running? srv)
+          (with-running-admission srv #(process-pending! srv))
+          (when @(:running? srv)
+            (doseq [{:keys [token events]}
+                    (net/await-ready (:poller srv) 1000)]
+              (with-running-admission
+                srv
+                (fn []
+                  (if (= token @(:listener-token srv))
+                    (when (contains? events :read)
+                      (try (do-accept srv)
+                           (catch :default e (report-error srv e))))
+                    (when-let [ctx (get @(:conns srv)
+                                        (:jolt.net/generation token))]
+                      (when (= token @(:token ctx))
+                        (handle-conn-events srv ctx events))))))))
+          (recur))))
+    (catch :default e
+      (deliver (:reactor-ready srv) {:error e})
+      (report-error srv e))
+    (finally
+      (cleanup-server! srv))))
 
 ;; --- public entry point ----------------------------------------------------
 (defn run-server
@@ -712,6 +1174,7 @@
     :port (required)             :handler (required, 3-arity fn)
     :read-buffer-size   8192     :write-buffer-size 32768
     :write-queue-size   64       :control-queue-size 32
+    :accept-batch-size  64       max accepts serviced per readiness turn
     :reuse-address?     false    :recv-buffer-size  (SO_RCVBUF)
     :executor (custom pool)      :pool-size 4  (default fixed-pool workers;
                                                 jolt's availableProcessors is 1)
@@ -721,7 +1184,8 @@
     :callback-executor           runs write/control completion callbacks; kept
                                  separate from :executor so a handler blocked on
                                  its own write cannot starve the callback that
-                                 releases it (defaults to a dedicated pool)
+                                 releases it; the same object is rejected
+    :callback-pool-size 2        size of the default dedicated fixed pool
     :shutdown-executor? false    adopt and shut down a supplied :executor;
                                  server-created executors are always shut down
     :shutdown-callback-executor? false
@@ -734,12 +1198,14 @@
   runs stop). See the namespace doc for the handler contract."
   [& opts]
   (let [{:keys [port handler read-buffer-size write-buffer-size write-queue-size
-                control-queue-size reuse-address? recv-buffer-size executor pool-size
-                error-logger callback-executor
+                control-queue-size accept-batch-size
+                reuse-address? recv-buffer-size executor pool-size
+                error-logger callback-executor callback-pool-size
                 shutdown-executor? shutdown-callback-executor?
                 stop-timeout-ms]
          :or   {read-buffer-size 8192 write-buffer-size 32768 write-queue-size 64
-                control-queue-size 32 pool-size 4
+                control-queue-size 32 accept-batch-size 64
+                pool-size 4 callback-pool-size 2
                 shutdown-executor? false
                 shutdown-callback-executor? false
                 stop-timeout-ms 5000
@@ -750,112 +1216,130 @@
     (assert (fn? handler) ":handler is required")
     (assert (and (number? stop-timeout-ms) (pos? (long stop-timeout-ms)))
             ":stop-timeout-ms must be a positive number")
-    (let [startup (atom {:cleanup-started? (atom false)})]
+    (assert (and (int? pool-size) (pos? (long pool-size)))
+            ":pool-size must be a positive int")
+    (assert (and (int? callback-pool-size)
+                 (pos? (long callback-pool-size)))
+            ":callback-pool-size must be a positive int")
+    (assert (and (int? accept-batch-size)
+                 (pos? (long accept-batch-size)))
+            ":accept-batch-size must be a positive int")
+    (let [cleanup-started? (atom false)
+          startup (atom {:cleanup-started? cleanup-started?})]
       (try
-        (let [listen-fd (net/listen-socket port {:reuse-address? reuse-address?
-                                                 :recv-buffer-size recv-buffer-size})]
-          (swap! startup assoc :listen-fd listen-fd)
-          (let [[wake-r wake-w] (net/make-pipe)]
-            (swap! startup assoc :wake-r wake-r :wake-w wake-w)
-            (let [recv-buf (ffi/alloc read-buffer-size)]
-              (swap! startup assoc :recv-buf recv-buf)
-              (let [send-buf (ffi/alloc 65536)]
-                (swap! startup assoc :send-buf send-buf)
-                (let [owns-executor? (nil? executor)
-                      ex (or executor
-                             (java.util.concurrent.Executors/newFixedThreadPool pool-size))
-                      shutdown-executor-on-cleanup?
-                      (or owns-executor? (true? shutdown-executor?))]
-                  (swap! startup assoc
-                         :executor ex
-                         :owns-executor? owns-executor?
-                         :shutdown-executor? shutdown-executor-on-cleanup?)
-                  (let [owns-callback-executor? (nil? callback-executor)
-                        ;; Separate from the handler pool on purpose — see
-                        ;; submit-callback.
-                        cb-ex (or callback-executor
-                                  (java.util.concurrent.Executors/newCachedThreadPool))
-                        shutdown-callback-on-cleanup?
-                        (or owns-callback-executor?
-                            (true? shutdown-callback-executor?))]
-                    (swap! startup assoc
-                           :callback-executor cb-ex
-                           :owns-callback-executor? owns-callback-executor?
-                           :shutdown-callback-executor?
-                           shutdown-callback-on-cleanup?)
-                    (let [running? (atom true)
-                          stopped (promise)
-                          ;; A newly scheduled future may begin before
-                          ;; future-call returns to this thread. Keep it outside
-                          ;; reactor-loop until the handle is complete.
-                          reactor-start (promise)
-                          srv {:conns (atom {}) :pending (atom #{})
-                               :next-generation (atom 0)
-                               :executor ex :callback-executor cb-ex
-                               :owns-executor? owns-executor?
-                               :owns-callback-executor? owns-callback-executor?
-                               :shutdown-executor?
-                               shutdown-executor-on-cleanup?
-                               :shutdown-callback-executor?
-                               shutdown-callback-on-cleanup?
-                               :listen-fd listen-fd :wake-r wake-r :wake-w wake-w
-                               :wake-gate (atom false)
-                               :wake-open? (atom true)
-                               :recv-buf recv-buf
-                               :send-buf send-buf :send-buf-size 65536
-                               :running? running? :stopped stopped
-                               :cleanup-started? (atom false)
-                               :stop-timeout-ms (long stop-timeout-ms)
-                               :opts {:handler handler :read-buffer-size read-buffer-size
-                                      :write-buffer-size write-buffer-size
-                                      :write-queue-size write-queue-size
-                                      :control-queue-size control-queue-size
-                                      :error-logger error-logger}}]
-                      (swap! startup assoc
-                             :srv srv
-                             :reactor-start reactor-start)
-                      (let [stop-fn
-                            (fn []
-                              (request-stop! srv)
-                              (when (= ::stop-timeout
-                                       (deref stopped (long stop-timeout-ms)
-                                              ::stop-timeout))
-                                (throw
-                                 (ex-info
-                                  (str "Timed out waiting for server cleanup after "
-                                       stop-timeout-ms "ms")
-                                  {:err ::stop-timeout
-                                   :timeout-ms (long stop-timeout-ms)
-                                   :port port})))
-                              nil)
-                            reactor-future
-                            (future
-                              (run-after-reactor-start!
-                               reactor-start
-                               #(reactor-loop srv)))
-                            handle {:teensyp/server true :srv srv
-                                    :listen-fd listen-fd :port port
-                                    :stop stop-fn :close stop-fn
-                                    :running? running? :stopped stopped
-                                    :reactor-future reactor-future}]
-                        (swap! startup assoc :reactor-future reactor-future)
-                        (deliver reactor-start :start)
-                        handle))))))))
+        (let [listener (net/listen
+                        (net/endpoint "127.0.0.1" port)
+                        {:reuse-address? reuse-address?
+                         :recv-buffer-size recv-buffer-size})]
+          (swap! startup assoc :listener listener)
+          (let [poller (net/open-poller)]
+            (swap! startup assoc :poller poller)
+            (let [owns-executor? (nil? executor)
+                  ex (or executor
+                         (java.util.concurrent.Executors/newFixedThreadPool
+                          pool-size))
+                  shutdown-executor-on-cleanup?
+                  (or owns-executor? (true? shutdown-executor?))]
+              (swap! startup assoc
+                     :executor ex
+                     :shutdown-executor? shutdown-executor-on-cleanup?)
+              (let [owns-callback-executor? (nil? callback-executor)
+                    cb-ex (or callback-executor
+                              (java.util.concurrent.Executors/newFixedThreadPool
+                               callback-pool-size))
+                    shutdown-callback-on-cleanup?
+                    (or owns-callback-executor?
+                        (true? shutdown-callback-executor?))]
+                (swap! startup assoc
+                       :callback-executor cb-ex
+                       :shutdown-callback-executor?
+                       shutdown-callback-on-cleanup?)
+                (when (identical? ex cb-ex)
+                  (throw
+                   (ex-info
+                    ":executor and :callback-executor must be different pools"
+                    {:err ::shared-handler-callback-executor})))
+                (let [running? (atom true)
+                    admission (atom {:phase :open :active 0})
+                    accept-gate (atom false)
+                    stopped (promise)
+                    reactor-start (promise)
+                    reactor-ready (promise)
+                    listener-token (atom nil)
+                    actual-port (:jolt.net/port (net/local-endpoint listener))
+                    listen-fd (net/native-handle listener)
+                    srv {:conns (atom {}) :pending (atom #{})
+                         :executor ex :callback-executor cb-ex
+                         :shutdown-executor?
+                         shutdown-executor-on-cleanup?
+                         :shutdown-callback-executor?
+                         shutdown-callback-on-cleanup?
+                         :listener listener :listener-token listener-token
+                         :poller poller
+                         :running? running? :admission admission
+                         :accept-gate accept-gate
+                         :stopped stopped
+                         :cleanup-started? cleanup-started?
+                         :handler-closes (task-tracker)
+                         :callback-tasks (task-tracker)
+                         :reactor-ready reactor-ready
+                         :stop-timeout-ms (long stop-timeout-ms)
+                         :opts {:handler handler
+                                :read-buffer-size read-buffer-size
+                                :write-buffer-size write-buffer-size
+                                :write-queue-size write-queue-size
+                                :control-queue-size control-queue-size
+                                :accept-batch-size accept-batch-size
+                                :error-logger error-logger}}]
+                (swap! startup assoc
+                       :callback-executor cb-ex
+                       :shutdown-callback-executor?
+                       shutdown-callback-on-cleanup?
+                       :srv srv
+                       :reactor-start reactor-start)
+                (let [reactor-future
+                      (future
+                        (run-after-reactor-start!
+                         reactor-start
+                         #(reactor-loop srv)))]
+                  (swap! startup assoc :reactor-future reactor-future)
+                  (deliver reactor-start :start)
+                  (swap! startup assoc :reactor-owned? true)
+                  (let [ready (deref reactor-ready)]
+                    (when-let [e (:error ready)]
+                      (throw e)))
+                  (let [stop-fn
+                        (fn []
+                          (request-stop! srv)
+                          (when (= ::stop-timeout
+                                   (deref stopped (long stop-timeout-ms)
+                                          ::stop-timeout))
+                            (throw
+                             (ex-info
+                              (str "Timed out waiting for server cleanup after "
+                                   stop-timeout-ms "ms")
+                              {:err ::stop-timeout
+                               :timeout-ms (long stop-timeout-ms)
+                               :port actual-port})))
+                          nil)]
+                    {:teensyp/server true :srv srv
+                     :listener listener
+                     :listen-fd listen-fd
+                     :port actual-port
+                     :stop stop-fn :close stop-fn
+                     :running? running? :stopped stopped
+                     :reactor-future reactor-future})))))))
         (catch :default e
-          (if-let [srv (:srv @startup)]
+          (if (:reactor-owned? @startup)
             (do
-              (request-stop! srv)
-              ;; If future construction succeeded but a later constructor step
-              ;; failed, release its start gate after revoking wake admission.
-              ;; cleanup-server!'s guard makes the catch/reactor race harmless.
-              (deliver (:reactor-start @startup) :abort)
-              (cleanup-server! srv))
+              (request-stop! (:srv @startup))
+              (deref (:stopped (:srv @startup))))
             (cleanup-startup! @startup))
           (throw e))))))
 
 (defn stop-server
   "Stop a server started by [[run-server]]: stop accepting, close the listen
-  socket, run each open connection's close-arity, and wait up to
-  `:stop-timeout-ms` for reactor-owned descriptors and native buffers to be
-  released. Repeated calls are safe and wait on the same completion."
+  socket, quiesce active handlers, run and await each open connection's
+  close-arity, and wait up to `:stop-timeout-ms` for reactor-owned jolt.net
+  resources and owned executors. Repeated calls wait on the same completion."
   [server] ((:stop server)) nil)
