@@ -41,6 +41,14 @@ runtime AOT prototype remains isolated on `research/aot-v5-prototype` at
   bounded shutdown drain, outcome-aware write failure, task retention, EOF
   visibility, and recursive-lock exclusion. The runtime suite adds the matching
   real-loopback and forced-interleaving witnesses.
+- `teensyp.client` now supplies the missing outbound blocking composition over
+  `jolt.net`: one absolute monotonic connect deadline across resolver
+  candidates, exact failed-attempt ownership rollback, persistent
+  direction-specific pollers, partial-safe byte I/O, nil EOF, additive
+  per-operation monotonic deadlines (including same-direction queue time), and
+  idempotent half/full close without exposing descriptors. Its separate proof
+  record has SAT controls, corrected bounded-UNSAT checks, and executable
+  semantic oracles.
 
 The remaining recommendations below should therefore be read as upstream
 capability rationale and historical workaround evidence. A workaround already

@@ -37,6 +37,43 @@ queue is drained before the next read.
 
 ## API
 
+### `teensyp.client`
+
+A production blocking outbound client over `jolt.net`:
+
+- `(connect host port)` / `(connect host port opts)` and
+  `(connect-endpoint endpoint opts)` resolve once and try candidates in resolver
+  order. `:connect-timeout-ms` defaults to 30000; callers that already compose
+  deadlines may pass one absolute `:deadline-nanos` in
+  `jolt.host/monotonic-nanos` units. The one deadline covers resolution and
+  every candidate rather than restarting for each address. The current
+  `jolt.net` resolver is synchronous: an over-deadline result is rejected, but
+  an in-flight `getaddrinfo` cannot yet be preempted.
+- `(send-all! connection bytes)` and its slice arity block until every byte is
+  written, correctly advancing across partial writes and retrying
+  the `jolt.net/would-block` sentinel. Both forms accept an additive options
+  arity with either relative `:timeout-ms` or absolute `:deadline-nanos`;
+  omitting both remains unbounded.
+- `(receive-into! connection bytes off len)` returns a positive count, zero for
+  an empty slice, or nil at EOF. `(receive-at-most! connection n)` provides the
+  allocating convenience form. Both receive forms accept the same optional
+  deadline map.
+- `(shutdown-write! connection)` half-closes once while preserving reads.
+  `(close! connection)` is idempotent, and the connection also works with
+  `with-open`.
+- `(connection-info connection)` returns transport-neutral local/remote
+  endpoints and lifecycle state, never a socket, poller, or native descriptor.
+
+Each connection owns persistent read and write pollers. Same-direction
+operations are FIFO-serialized by an owner-independent promise gate, while one
+reader and one writer may proceed concurrently. Closing wakes both directions
+before retiring the socket; no operation allocates a poller. Operation
+deadlines are computed at API entry and include time queued behind an earlier
+same-direction operation. A timed-out queue ticket is cancelled without taking
+ownership. Deadline expiry throws `:teensyp.client/timed-out` with
+`:teensyp.client/op` set to `:send` or `:receive`; EOF and native reset/close
+remain their original transport outcomes.
+
 ### `teensyp.server`
 - `(run-server & opts)` / `(run-server opts-map)` — start the server; returns a
   handle usable with `stop-server` and `with-open`. Options: `:port` (required),
@@ -113,9 +150,9 @@ blocks until the write outcome is known and throws the recorded native
 exception on failure.
 
 ### `teensyp.ffi-net`
-A compatibility client used only by the real-loopback tests. Despite the legacy
+A compatibility shim for the former real-loopback helper. Despite the legacy
 namespace name, it has no FFI bindings or raw-descriptor API: all operations
-delegate to public `jolt.net` owned sockets and readiness.
+delegate to the production `teensyp.client` surface.
 
 ## Differences from JVM teensyp
 
@@ -193,7 +230,10 @@ proofs](docs/proofs/reactor-lifecycle-invariants.md) preserve the
 ownership/generation boundary delegated to `jolt.net`, plus the EOF
 byte-visibility, recursive-lock, admission, shutdown, and write-outcome
 arguments together with their SAT/UNSAT controls and executable runtime
-witnesses.
+witnesses. The separate [outbound-client proof
+record](docs/proofs/client-connection-invariants.md) covers absolute deadline
+composition, resolver-candidate/socket/poller ownership, partial byte I/O, and
+the public loopback contract.
 
 jolt-hegel is a test-only dependency, pinned by SHA in the `:test` alias.
 Property failures print a replayable seed.

@@ -8,10 +8,12 @@
             [teensyp.server :as tcp]
             [teensyp.buffer :as buf]
             [teensyp.stream :as stream]
+            [teensyp.client :as client]
             [teensyp.ffi-net :as net]
             [jolt.net :as jnet]
             ;; loaded for their side effects on the run: the deftests below are
             ;; discovered by clojure.test/run-tests, the properties by run-properties!
+            [teensyp.client-test]
             [teensyp.buffer-property-test]
             [teensyp.server-property-test]))
 
@@ -409,10 +411,8 @@
             info (tcp/socket-info sock)
             token @(:token sock)
             generation (:jolt.net/generation token)
-            client-local (@#'tcp/portable-endpoint
-                          (jnet/local-endpoint client))
-            client-peer (@#'tcp/portable-endpoint
-                         (jnet/peer-endpoint client))]
+            client-local (:local-address (client/connection-info client))
+            client-peer (:remote-address (client/connection-info client))]
         (check "accepted Context owns its jolt.net socket"
                true (true? (:jolt.net/handle (:socket sock))))
         (check "connection registry is keyed by stable handle generation"
@@ -1023,8 +1023,8 @@
         srv (tcp/run-server :port 0 :handler handler :reuse-address? true
                             :write-buffer-size payload-size
                             :stop-timeout-ms 7000)
-        client (jnet/connect (jnet/endpoint "127.0.0.1" (:port srv))
-                             {:no-delay? true :recv-buffer-size 1024})]
+        client (client/connect "127.0.0.1" (:port srv)
+                               {:no-delay? true :recv-buffer-size 1024})]
     (try
       (check "active handler queued its backpressured write"
              true (deref queued 2000 false))
@@ -1198,7 +1198,8 @@
   ;; directly and count their own failures. Both fold into the same total so
   ;; `joltc -M:test` stays the single gate.
   (println "\n-- teensyp.buffer generative properties (jolt-hegel) --")
-  (let [s (clojure.test/run-tests 'teensyp.buffer-property-test)]
+  (let [s (clojure.test/run-tests 'teensyp.client-test
+                                  'teensyp.buffer-property-test)]
     (swap! failures + (+ (:fail s 0) (:error s 0))))
   (swap! failures + (teensyp.server-property-test/run-properties!))
 
