@@ -35,6 +35,22 @@
 
 (def ^:private run-opts {:test-cases 40 :database "" :verbosity :quiet})
 
+(defn- nonblank-env [name]
+  (let [value (System/getenv name)]
+    (when (and value (not (str/blank? value))) value)))
+
+(defn- property-run-opts
+  "Apply the optional CI/local replay seed to one Hegel run. Keeping this at
+  the run boundary makes a printed seed directly replayable without editing
+  source:
+
+    TEENSYP_HEGEL_SEED=1767470842619
+    TEENSYP_HEGEL_ONLY=line-framing joltc -M:test"
+  [opts]
+  (if-let [seed (nonblank-env "TEENSYP_HEGEL_SEED")]
+    (assoc opts :seed (parse-long seed))
+    opts))
+
 ;; Out-of-band failure log. A libhegel-detected nondeterministic run comes back
 ;; with :failures [] and no counterexample, so the only record of what actually
 ;; went wrong in the case that did not reproduce is what we noted as it happened.
@@ -140,7 +156,10 @@
   ([state sock b]
    (let [n (buf/remaining b)]
      (when (pos? n) (tcp/write sock (buf/wrap (buf/get-bytes! b n))))
-     (when (tcp/peer-closed? sock) (tcp/close sock))
+     ;; EOF can become observable while this invocation still has a pre-EOF
+     ;; buffer view. Close only from the terminal notification, after every
+     ;; byte that preceded EOF is present in the current view.
+     (when (tcp/peer-eof-notified? sock) (tcp/close sock))
      state))
   ([_state _ex] nil))
 
@@ -151,7 +170,7 @@
      (when-some [line (buf/read-line b "UTF-8")]
        (tcp/write sock (buf/str->buffer (str (str/join (reverse line)) "\n") "UTF-8"))
        (recur)))
-   (when (tcp/peer-closed? sock) (tcp/close sock))
+   (when (tcp/peer-eof-notified? sock) (tcp/close sock))
    state)
   ([_state _ex] nil))
 
@@ -165,7 +184,7 @@
   ([state sock b]
    (let [n (buf/remaining b)]
      (when (pos? n) (tcp/write sock (buf/wrap (buf/get-bytes! b n))))
-     (when (tcp/peer-closed? sock) (tcp/close sock))
+     (when (tcp/peer-eof-notified? sock) (tcp/close sock))
      state))
   ([_state _ex] nil))
 
@@ -220,7 +239,7 @@
        "echo conserves bytes under arbitrary chunking (read-buffer-size 64)"
        (fn []
          (h/run-test!
-          (assoc run-opts :name "server/echo-chunking")
+          (property-run-opts (assoc run-opts :name "server/echo-chunking"))
           (fn [_]
             (g/let [payload (g/vector {:min-size 1 :max-size 2048} (g/octet))
                     chunks (g/chunkings payload)]
@@ -243,7 +262,7 @@
        "line framing is invariant under chunking"
        (fn []
          (h/run-test!
-          (assoc run-opts :name "server/line-framing")
+          (property-run-opts (assoc run-opts :name "server/line-framing"))
           (fn [_]
             (g/let [lines (g/vector {:min-size 1 :max-size 8}
                                     (g/string {:codec :ascii :max-size 24
@@ -267,7 +286,8 @@
        "chained write callbacks deliver in queue order"
        (fn []
          (h/run-test!
-          (assoc run-opts :test-cases 25 :name "server/write-ordering")
+          (property-run-opts
+           (assoc run-opts :test-cases 25 :name "server/write-ordering"))
           (fn [_]
             (let [msgs (h/draw! (g/vector {:min-size 1 :max-size 10}
                                           (g/string {:codec :ascii :min-size 1 :max-size 40
@@ -293,7 +313,8 @@
        "paused reads lose nothing once resumed"
        (fn []
          (h/run-test!
-          (assoc run-opts :test-cases 25 :name "server/pause-resume")
+          (property-run-opts
+           (assoc run-opts :test-cases 25 :name "server/pause-resume"))
           (fn [_]
             (g/let [payload (g/vector {:min-size 1 :max-size 1024} (g/octet))
                     chunks (g/chunkings payload)]
@@ -317,7 +338,8 @@
        "a single oversized write arrives intact"
        (fn []
          (h/run-test!
-          (assoc run-opts :test-cases 15 :name "server/large-write")
+          (property-run-opts
+           (assoc run-opts :test-cases 15 :name "server/large-write"))
           (fn [_]
             (let [n (h/draw! (g/integer 65537 400000))
                   ;; A cheap position-dependent pattern: any duplication,
@@ -369,7 +391,8 @@
        "stream conn-read-line frames identically under chunking"
        (fn []
          (h/run-test!
-          (assoc run-opts :test-cases 25 :name "server/stream-lines")
+          (property-run-opts
+           (assoc run-opts :test-cases 25 :name "server/stream-lines"))
           (fn [_]
             (g/let [lines (g/vector {:min-size 1 :max-size 6}
                                     (g/string {:codec :ascii :min-size 1 :max-size 20
@@ -396,10 +419,20 @@
   "Run the TCP properties. Returns the number of failed properties."
   []
   (println "\n-- teensyp.server generative properties (jolt-hegel) --")
-  (prop-echo-conservation)
-  (prop-line-framing-invariance)
-  (prop-write-callback-ordering)
-  (prop-pause-resume-conserves)
-  (prop-large-single-write)
-  (prop-stream-line-framing)
+  (case (nonblank-env "TEENSYP_HEGEL_ONLY")
+    nil (do
+          (prop-echo-conservation)
+          (prop-line-framing-invariance)
+          (prop-write-callback-ordering)
+          (prop-pause-resume-conserves)
+          (prop-large-single-write)
+          (prop-stream-line-framing))
+    "echo-chunking" (prop-echo-conservation)
+    "line-framing" (prop-line-framing-invariance)
+    "write-ordering" (prop-write-callback-ordering)
+    "pause-resume" (prop-pause-resume-conserves)
+    "large-write" (prop-large-single-write)
+    "stream-lines" (prop-stream-line-framing)
+    (throw (ex-info "Unknown TEENSYP_HEGEL_ONLY property"
+                    {:value (nonblank-env "TEENSYP_HEGEL_ONLY")})))
   (failure-count))
