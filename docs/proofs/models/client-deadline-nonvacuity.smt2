@@ -1,0 +1,37 @@
+; Non-vacuity: candidate 1 may fail after consuming part of the one absolute
+; budget and candidate 2 may still connect before that deadline.
+
+(declare-const deadline Int)
+(declare-const start1 Int)
+(declare-const request1 Int)
+(declare-const duration1 Int)
+(declare-const start2 Int)
+(declare-const request2 Int)
+(declare-const duration2 Int)
+(declare-const success-time Int)
+(declare-const candidate2_succeeds Bool)
+(declare-const candidate3_attempted Bool)
+(declare-const valid_trace Bool)
+
+(assert (! (= deadline 10) :named fixed_deadline))
+(assert (! (= start1 0) :named first_start))
+(assert (! (= request1 (- deadline start1))
+           :named first_remaining_budget))
+(assert (! (= duration1 4) :named first_failure_duration))
+(assert (! (= start2 (+ start1 duration1)) :named second_start))
+(assert (! (= request2 (- deadline start2))
+           :named second_remaining_budget))
+(assert (! (= duration2 2) :named second_success_duration))
+(assert (! (= success-time (+ start2 duration2)) :named success_time))
+(assert (! (= candidate2_succeeds (< success-time deadline))
+           :named candidate2_success_definition))
+(assert (! (= candidate3_attempted false)
+           :named success_stops_candidate_advancement))
+(assert (! (= valid_trace
+              (and candidate2_succeeds
+                   (not candidate3_attempted)
+                   (= request1 10)
+                   (= request2 6)
+                   (= success-time 6)))
+           :named valid_trace_definition))
+(assert (! valid_trace :named nonvacuity_query))

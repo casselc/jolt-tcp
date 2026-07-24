@@ -1,0 +1,30 @@
+; Non-vacuity: candidate 1 fails, candidate 2 succeeds, candidate 3 is never
+; attempted, and exactly candidate 2 plus the poller transfer to the connection.
+
+(declare-const outcome Int)
+(declare-const attempted1 Bool)
+(declare-const attempted2 Bool)
+(declare-const attempted3 Bool)
+(declare-const socket1_open Bool)
+(declare-const socket2_open Bool)
+(declare-const socket3_open Bool)
+(declare-const poller_open Bool)
+(declare-const poller_transferred Bool)
+(declare-const valid_state Bool)
+
+(assert (! (= outcome 2) :named candidate2_success))
+(assert (! (= attempted1 true) :named candidate1_attempted))
+(assert (! (= attempted2 true) :named candidate2_attempted))
+(assert (! (= attempted3 false) :named candidate3_not_attempted))
+(assert (! (= socket1_open false) :named failed_socket_closed))
+(assert (! (= socket2_open true) :named selected_socket_open))
+(assert (! (= socket3_open false) :named unattempted_socket_closed))
+(assert (! (= poller_open true) :named selected_poller_open))
+(assert (! (= poller_transferred true) :named selected_poller_transferred))
+(assert (! (= valid_state
+              (and (= outcome 2)
+                   attempted1 attempted2 (not attempted3)
+                   (not socket1_open) socket2_open (not socket3_open)
+                   poller_open poller_transferred))
+           :named valid_state_definition))
+(assert (! valid_state :named nonvacuity_query))
