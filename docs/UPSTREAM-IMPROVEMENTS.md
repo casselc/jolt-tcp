@@ -17,11 +17,16 @@ The vendored [`stdlib/jolt/ffi.clj`](../refs/jolt/stdlib/jolt/ffi.clj) remains a
 thin macro surface over host-provided primitives. Recheck every claim against
 the exact upstream SHA before removing a workaround.
 
+The separate local Jolt proposal fork checkpoints packages 3--5 at `3105198a`
+and the AOT proof record at `cb1ca22c`. Its known-unsound runtime AOT prototype
+is isolated on `research/aot-v5-prototype` at `21062d5b`; none of these commits
+has been pushed and no pull request has been opened.
+
 ## Priority summary
 
 | Priority | Upstream area | Independently landable change | Main payoff |
 | --- | --- | --- | --- |
-| P0 | Jolt loader | Dependency-correct AOT cache identity | Prevent stale macro-expanded or collided server code |
+| P0 | Jolt build | Closed-world, fresh-process AOT; selective runtime reuse remains research-only | Prevent server artifacts from mixing mutable compiler states |
 | P1 | Jolt runtime | Reproduce and harden concurrent foreign calls | Prevent process corruption under concurrent socket work |
 | P1 | `jolt.ffi` | Overlapping array copy and range-aware native byte transfer | Remove receive/send allocations and per-byte loops |
 | P1 | `jolt.ffi` | Narrow integers | Delete `pollfd` half-word packing |
@@ -38,7 +43,7 @@ P0 is a demonstrated wrong-code class. P1 removes a correctness or
 process-safety risk. P2 is high-value consolidation. P3 can follow once the
 smaller substrate is measured.
 
-## 1. Make AOT identity include compile-time dependencies
+## 1. Replace selective runtime AOT reuse with a closed-world build
 
 ### Current constraint
 
@@ -60,36 +65,53 @@ collision-prone cache. TCP and HTTP code are not less exposed than a version
 namespace: stale macro expansions, constants, protocol code, or FFI definitions
 can all be compiled into an unchanged consumer.
 
+The deeper review showed that a dependency manifest is not a complete boundary.
+Live fixtures found compile-time reads of ordinary nonmacro Vars without
+`require` edges, global type-registry changes, and pre-`ns` caller context.
+Other failures crossed reader/compiler callbacks, aliases, retained namespace
+cells, direct/nested loading, and selection-time mutation.
+
+The checked-in 41-model Chiasmus/Z3 suite proves bounded gates only if every
+consumed compiler input is observed completely, synchronously, and through
+non-spoofable instrumentation. It does not prove instrumentation completeness.
+See the cross-project
+[`AOT proof record`](../../jolt-upstream/docs/aot-cache-provenance-invariants.md).
+
 ### Upstream change
 
-Identify a compiled namespace by all compile inputs:
+Make production AOT a closed-world build:
 
-- a cryptographic source digest;
-- fingerprints of macro providers, data readers, and namespaces loaded during
-  compilation;
-- compiler options and feature inputs;
-- compiler/Jolt version; and
-- the complete target identity.
+- start a fresh compiler process and namespace image;
+- resolve and digest the exact project graph;
+- require each file's first meaningful form to declare the requested namespace;
+- freeze readers, compiler/features, target, Jolt version, and declared native
+  inputs;
+- compile one snapshot into one immutable executable/image; and
+- reject or fall back for dynamic compiler effects outside the graph.
 
-Advance the cache-format directory and define whether source metadata is keyed
-by checkout or rebased at load time. A reusable native streaming SHA-256
-primitive should provide the digest rather than a cheap runtime hash.
+Do not reuse the image against independently mutated live compiler/runtime
+state. Whole-image content addressing is reasonable; selective in-process
+namespace reuse remains research-only. A reusable native streaming SHA-256
+primitive should provide whole-build identity rather than a cheap runtime hash.
 
 ### Acceptance criteria
 
-- Same-length different sources never share an artifact.
-- An unchanged namespace recompiles when a macro dependency changes and
-  observes the new expansion.
-- Target or compiler-option changes cannot reuse an incompatible artifact.
-- Source metadata and diagnostics describe the currently resolved source.
-- Parallel publication, corruption recovery, `:reload`, and `:reload-all`
-  continue to pass.
+- Same-length source changes produce different build identities and results.
+- Macro, compile-time nonmacro Var, reader, alias, registry, target, or compiler
+  changes rebuild the snapshot or fail closed before user forms execute.
+- Source metadata and diagnostics describe the selected build sources.
+- Dynamic load/reload outside the declared graph is rejected or takes the
+  ordinary non-AOT path.
+- Concurrent publication cannot mix namespace generations.
+- An identical clean build deterministically reuses or reproduces one immutable
+  image.
 
 ### jolt-tcp payoff
 
 Server behavior can no longer silently lag behind resolved source. Project
-documentation can stop treating cache deletion as a correctness mechanism once
-the minimum supported Jolt has the fix.
+documentation can stop treating cache deletion as a correctness mechanism for
+the validated closed-world build. The current runtime cache warning must remain
+for selective namespace loading.
 
 ## 2. Harden concurrent foreign calls independently of scheduler work
 
@@ -461,7 +483,8 @@ reactor exception isolation likewise remain jolt-tcp concerns.
 
 ## Recommended implementation order
 
-1. Fix dependency-aware AOT identity upstream.
+1. Specify the closed-world, fresh-process AOT build and whole-build digest. Do
+   not ship the selective runtime namespace-cache prototype as the fix.
 2. Reduce and fix concurrent-FFI safety independently of executor/scheduler
    semantics.
 3. Add overlapping copy and range-aware native byte transfers.
