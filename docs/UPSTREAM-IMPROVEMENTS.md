@@ -17,12 +17,35 @@ The vendored [`stdlib/jolt/ffi.clj`](../refs/jolt/stdlib/jolt/ffi.clj) remains a
 thin macro surface over host-provided primitives. Recheck every claim against
 the exact upstream SHA before removing a workaround.
 
-The separate local Jolt proposal fork has the initial packages 2--5 checkpoint
-at `3105198a`, the fail-closed target correction at `34fabb2c`, and the AOT
-proof record through `6df64292`, followed by the host-class registration seam at
-`287f9022`. Its known-unsound runtime AOT prototype is isolated on
-`research/aot-v5-prototype` at `21062d5b`; none of these commits has been pushed
-and no pull request has been opened.
+The reviewed Jolt proposal fork is now published only to `casselc/jolt` on
+`codex/upstream-improvements-6-8`; nothing has been pushed to the upstream
+project's origin and no pull request has been opened. Its network prerequisites
+include scoped byte-array ranges at `1c8fdb97`, Windows path correction at
+`358c42b7`, and the variadic FFI boundary at `ecf7728f`. The known-unsound
+runtime AOT prototype remains isolated on `research/aot-v5-prototype` at
+`21062d5b` and is not part of the proposal branch.
+
+## Implementation update — 2026-07-24
+
+- `jolt-tcp` production code now consumes the public `jolt.net` owned-handle,
+  byte-slice, poller, endpoint, and lifecycle APIs. It has no direct
+  `jolt.ffi`, `pollfd`, `fcntl`, pipe-wake, errno, or native-layout code.
+- `deps.edn` pins `casselc/jolt-net` at
+  `eabf9067f32d0f4c1673b5d84c24484943ea75c5`. That revision passed the complete
+  Linux x86-64 and macOS arm64 runtime suites plus Linux, Darwin, and Windows
+  ABI probes with source-built Chez 10.4.1.
+- The TCP layer retains only transport-neutral endpoint maps and the diagnostic
+  descriptor. Stable ownership generation and stale-readiness rejection remain
+  `jolt.net` invariants rather than being duplicated here.
+- TCP-specific proofs now cover accept/stop publication, executor rejection,
+  bounded shutdown drain, outcome-aware write failure, task retention, EOF
+  visibility, and recursive-lock exclusion. The runtime suite adds the matching
+  real-loopback and forced-interleaving witnesses.
+
+The remaining recommendations below should therefore be read as upstream
+capability rationale and historical workaround evidence. A workaround already
+deleted from `jolt-tcp` is not evidence that every other ecosystem consumer has
+adopted the corresponding primitive.
 
 ## Priority summary
 

@@ -1,5 +1,10 @@
 # Claude handoff: first `jolt.net` implementation slice
 
+> **Historical handoff.** This prompt has been executed and must not be treated
+> as the current implementation plan. The resulting substrate is maintained in
+> `casselc/jolt-net`; its platform contract and current evidence are recorded in
+> `jolt-net/docs/CLOJURE-PLATFORM.md` and `jolt-net/docs/PLATFORM-COVERAGE.md`.
+
 Use the following as the implementation prompt.
 
 ---
