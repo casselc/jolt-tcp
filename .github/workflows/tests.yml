@@ -12,8 +12,12 @@ jobs:
         include:
           - name: Linux x86_64
             runner: ubuntu-24.04
+          - name: Linux aarch64
+            runner: ubuntu-24.04-arm
           - name: macOS arm64
             runner: macos-14
+          - name: macOS x86_64
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
@@ -89,9 +93,32 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: casselc/jolt
-          ref: ecf7728f15d8b8f858327c47dbd8b751eb36798c
+          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
           submodules: recursive
           path: jolt
+
+      # libhegel 0.30.1 has no Darwin/x86_64 release asset. Build the exact
+      # tagged source so Intel macOS still runs the complete property suite.
+      - name: Checkout pinned libhegel source (macOS x86_64)
+        if: runner.os == 'macOS' && runner.arch == 'X64'
+        uses: actions/checkout@v4
+        with:
+          repository: hegeldev/hegel-rust
+          ref: f81c6cceabe3c6695a249588c751a5ce93dffa00
+          persist-credentials: false
+          path: hegel-rust
+
+      - name: Build pinned libhegel 0.30.1 (macOS x86_64)
+        if: runner.os == 'macOS' && runner.arch == 'X64'
+        working-directory: hegel-rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.86.0 --profile minimal
+          cargo +1.86.0 build --locked -p hegeltest-c --release
+          library="$PWD/target/release/libhegel_c.dylib"
+          test -f "$library"
+          echo "HEGEL_LIBHEGEL_LIBRARY=$library" >> "$GITHUB_ENV"
 
       - name: Install libhegel
         shell: bash
@@ -101,7 +128,175 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          JOLT_HEGEL_REQUIRED: "1"
         run: |
           JOLT_PWD="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/jolt/bin/joltc" -M:test
 
-# Windows is intentionally absent until jolt.net has a Windows readiness poller.
+# The pinned jolt.net has reviewed Windows W1/W2 blocking and non-blocking byte
+# I/O, but no readiness backend. Keep native layers anyway: source-build Chez,
+# first exercise dependency-free TCP models and production namespace loading,
+# then install libhegel and run descriptor-independent buffer properties.
+# Requiring open-poller to fail closed keeps these claims distinct from real
+# client/server loopback coverage.
+  windows-portable:
+    name: portable TCP gate (Windows x86_64; no socket runtime)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/aot-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 source-build toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          path-type: inherit
+          install: >-
+            git make mingw-w64-x86_64-gcc mingw-w64-x86_64-lz4
+            mingw-w64-x86_64-zlib
+
+      - name: Cache Chez Scheme
+        id: cache-chez-windows
+        uses: actions/cache@v4
+        with:
+          path: chez-install
+          key: chez-${{ runner.os }}-${{ runner.arch }}-v10.4.1-mingw64-v1
+
+      - name: Build official Chez Scheme v10.4.1 from source
+        if: steps.cache-chez-windows.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v10.4.1 \
+            https://github.com/cisco/ChezScheme.git "$RUNNER_TEMP/chez-src"
+          cd "$RUNNER_TEMP/chez-src"
+          ./configure --threads
+          make -j"$(nproc)"
+          inst="$GITHUB_WORKSPACE/chez-install"
+          mkdir -p "$inst/bin" "$inst/csv"
+          cp ta6nt/bin/ta6nt/*.exe "$inst/bin/"
+          cp ta6nt/bin/ta6nt/*.dll "$inst/bin/" 2>/dev/null || true
+          cp ta6nt/boot/ta6nt/petite.boot ta6nt/boot/ta6nt/scheme.boot "$inst/bin/"
+          cp ta6nt/boot/ta6nt/petite.boot ta6nt/boot/ta6nt/scheme.boot "$inst/csv/"
+          cp ta6nt/boot/ta6nt/scheme.h "$inst/csv/"
+          cp ta6nt/boot/ta6nt/libkernel.a "$inst/csv/"
+
+      - name: Provide and assert official Chez v10.4.1
+        run: |
+          set -euo pipefail
+          bindir="$GITHUB_WORKSPACE/chez-install/bin"
+          test -x "$bindir/scheme.exe"
+          { echo '#!/bin/sh'; echo "exec \"$bindir/scheme.exe\" \"\$@\""; } > "$bindir/chez"
+          { echo '#!/bin/sh'; echo 'exec gcc "$@"'; } > "$bindir/cc"
+          chmod +x "$bindir/chez" "$bindir/cc"
+          echo "$bindir" >> "$GITHUB_PATH"
+          echo "JOLT_CHEZ_CSV=$GITHUB_WORKSPACE/chez-install/csv" >> "$GITHUB_ENV"
+          "$bindir/chez" --version | tee "$RUNNER_TEMP/chez-version"
+          grep -Fq '10.4.1' "$RUNNER_TEMP/chez-version"
+
+      - name: Checkout pinned Jolt core
+        uses: actions/checkout@v4
+        with:
+          repository: casselc/jolt
+          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          submodules: recursive
+          path: jolt
+
+      - name: Run dependency-free portable TCP contracts
+        shell: powershell
+        env:
+          JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
+        run: |
+          & "$env:GITHUB_WORKSPACE\tools\test-windows-source.ps1" `
+            -JoltTcpPath "$env:GITHUB_WORKSPACE" `
+            -RuntimePath "$env:GITHUB_WORKSPACE\jolt" `
+            -ChezExe "$env:GITHUB_WORKSPACE\chez-install\bin\scheme.exe" `
+            -TestAlias '-M:windows-portable-test' `
+            -TimeoutSeconds 180
+
+      - name: Install libhegel and run portable buffer properties
+        shell: powershell
+        env:
+          JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
+          JOLT_HEGEL_REQUIRED: "1"
+        run: |
+          & "$env:GITHUB_WORKSPACE\tools\test-windows-source.ps1" `
+            -JoltTcpPath "$env:GITHUB_WORKSPACE" `
+            -RuntimePath "$env:GITHUB_WORKSPACE\jolt" `
+            -ChezExe "$env:GITHUB_WORKSPACE\chez-install\bin\scheme.exe" `
+            -TestAlias '-M:windows-buffer-property-test' `
+            -InstallHegel `
+            -TimeoutSeconds 180
+
+# Windows ARM64 has no reviewed jolt.net descriptor yet, so loading
+# teensyp.client/server would correctly fail before any socket call. This
+# public-preview lane still proves that native source-mode Jolt and libhegel can
+# exercise the descriptor-independent production buffer layer. It then checks
+# the dependency's unsupported target boundary explicitly. No packaged joltc,
+# devboot, AOT cache, emulated x64 Chez, or socket-runtime claim is involved.
+  windows-arm64-source-preview:
+    name: source-mode buffer preview (Windows aarch64; non-AOT, no sockets)
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 40
+    continue-on-error: true
+    env:
+      JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
+    steps:
+      - name: Checkout jolt-tcp
+        uses: actions/checkout@v4
+
+      - name: Checkout official Chez Scheme v10.4.1
+        uses: actions/checkout@v4
+        with:
+          repository: cisco/ChezScheme
+          ref: v10.4.1
+          submodules: recursive
+          persist-credentials: false
+          path: chez-arm64
+
+      - name: Build native ARM64 Chez Scheme from source
+        shell: cmd
+        run: |
+          cd /d "%GITHUB_WORKSPACE%\chez-arm64"
+          call build.bat tarm64nt /only
+
+      - name: Checkout pinned Jolt core
+        uses: actions/checkout@v4
+        with:
+          repository: casselc/jolt
+          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          submodules: recursive
+          path: jolt
+
+      - name: Assert native Chez for source-mode Jolt
+        shell: pwsh
+        run: |
+          $scheme = Join-Path $env:GITHUB_WORKSPACE `
+            'chez-arm64\tarm64nt\bin\tarm64nt\scheme.exe'
+          if (-not (Test-Path $scheme)) {
+            throw "native ARM64 Chez executable not found: $scheme"
+          }
+          $version = (& $scheme --version | Out-String)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host $version
+          if (-not $version.Contains('10.4.1')) {
+            throw "expected Chez Scheme 10.4.1, got: $version"
+          }
+
+      - name: Resolve Git dependencies and run portable buffer properties
+        shell: pwsh
+        env:
+          JOLT_HEGEL_REQUIRED: "1"
+        run: |
+          & "$env:GITHUB_WORKSPACE\tools\test-windows-source.ps1" `
+            -JoltTcpPath "$env:GITHUB_WORKSPACE" `
+            -RuntimePath "$env:GITHUB_WORKSPACE\jolt" `
+            -ChezExe "$env:GITHUB_WORKSPACE\chez-arm64\tarm64nt\bin\tarm64nt\scheme.exe" `
+            -TestAlias '-M:windows-arm64-preview' `
+            -InstallHegel `
+            -TimeoutSeconds 180

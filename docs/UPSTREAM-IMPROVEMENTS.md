@@ -19,11 +19,13 @@ the exact upstream SHA before removing a workaround.
 
 The reviewed Jolt proposal fork is now published only to `casselc/jolt` on
 `codex/upstream-improvements-6-8`; nothing has been pushed to the upstream
-project's origin and no pull request has been opened. Its network prerequisites
-include scoped byte-array ranges at `1c8fdb97`, Windows path correction at
-`358c42b7`, and the variadic FFI boundary at `ecf7728f`. The known-unsound
-runtime AOT prototype remains isolated on `research/aot-v5-prototype` at
-`21062d5b` and is not part of the proposal branch.
+project's origin and no pull request has been opened. The exact core revision
+used here is `85f645aa1178e4b631198dcbaf46bdad1283750b`. It includes scoped
+byte-array ranges introduced at `1c8fdb97`, Windows path correction at
+`358c42b7`, and the variadic FFI boundary introduced at `ecf7728f`. The
+known-unsound runtime AOT prototype remains isolated on
+`research/aot-v5-prototype` at `21062d5b` and is not part of the proposal
+branch.
 
 ## Implementation update — 2026-07-24
 
@@ -31,9 +33,12 @@ runtime AOT prototype remains isolated on `research/aot-v5-prototype` at
   byte-slice, poller, endpoint, and lifecycle APIs. It has no direct
   `jolt.ffi`, `pollfd`, `fcntl`, pipe-wake, errno, or native-layout code.
 - `deps.edn` pins `casselc/jolt-net` at
-  `eabf9067f32d0f4c1673b5d84c24484943ea75c5`. That revision passed the complete
-  Linux x86-64 and macOS arm64 runtime suites plus Linux, Darwin, and Windows
-  ABI probes with source-built Chez 10.4.1.
+  `7de096d0f02f0f452124a110cbbd4f5b966f4c67`. That CI follow-up to the reviewed
+  combined W1/W2 merge adds native POSIX descriptor validation without changing
+  its API. The branch combines Windows W1 blocking runtime and W2 non-blocking
+  byte-I/O evidence while preserving a fail-closed readiness boundary. It does
+  not claim Windows TCP loopback support; the exact revision's hosted platform
+  jobs remain candidate evidence until observed green.
 - The TCP layer retains only transport-neutral endpoint maps and the diagnostic
   descriptor. Stable ownership generation and stale-readiness rejection remain
   `jolt.net` invariants rather than being duplicated here.

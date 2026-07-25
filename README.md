@@ -43,8 +43,9 @@ A production blocking outbound client over `jolt.net`:
 
 - `(connect host port)` / `(connect host port opts)` and
   `(connect-endpoint endpoint opts)` resolve once and try candidates in resolver
-  order. `:connect-timeout-ms` defaults to 30000; callers that already compose
-  deadlines may pass one absolute `:deadline-nanos` in
+  order. `:connect-timeout-ms` defaults to 30000; explicitly passing
+  `:connect-timeout-ms nil` selects an unbounded connect. Callers that already
+  compose deadlines may pass one absolute `:deadline-nanos` in
   `jolt.host/monotonic-nanos` units. The one deadline covers resolution and
   every candidate rather than restarting for each address. The current
   `jolt.net` resolver is synchronous: an over-deadline result is rejected, but
@@ -170,22 +171,51 @@ delegate to the production `teensyp.client` surface.
   `:remote-address`, plus `:fd` for diagnostics only. The public TCP boundary
   does not expose `jolt.net`-namespaced data keys.
 - **Platform**: follows the readiness targets implemented by `jolt.net`;
-  currently Linux and macOS. Windows readiness is a follow-up.
+  currently Linux x86_64, Linux aarch64, macOS arm64, and macOS x86_64.
+  Windows readiness is a follow-up. Windows x86_64 and aarch64 source-mode
+  portable gates do not change that runtime boundary.
+
+### CI platform coverage
+
+- Linux x86_64 and macOS arm64 have observed native runtime evidence for the
+  complete reactor, real-loopback acceptance, outbound-client, and property
+  suites with source-built Chez 10.4.1.
+- Linux aarch64 (`ubuntu-24.04-arm`) and macOS x86_64
+  (`macos-15-intel`) have equivalent full-runtime jobs configured. Treat both
+  as candidate coverage until those jobs are observed green on this revision.
+  Because libhegel 0.30.1 publishes no Darwin/x86_64 asset, the Intel job builds
+  its exact tagged source and supplies the resulting library explicitly.
+- Windows x86_64 has candidate native layered gates. The first source-builds
+  Chez, loads the production TCP namespaces, runs the platform-independent
+  outbound-client models with no optional test dependency, and requires
+  `jolt.net/open-poller` to fail with `:unsupported-target`. The second installs
+  libhegel and runs the descriptor-independent buffer properties. The pinned
+  `jolt.net` includes reviewed W1/W2 blocking and non-blocking byte-I/O
+  substrate, but neither gate is **socket-runtime support**: no TCP
+  server/client loopback test is enabled until Windows readiness exists.
+- Windows aarch64 has a non-gating public-preview source-mode lane on
+  `windows-11-vs2026-arm`. It builds native `tarm64nt` Chez 10.4.1 and runs the
+  descriptor-independent `teensyp.buffer` property suite through the upstream
+  Windows ARM64 libhegel asset. Because jolt-net's newly probed ARM64 facts have
+  not yet been reviewed into a descriptor, this lane requires target selection
+  to fail closed and does not load the client/server namespaces. It uses no
+  packaged joltc, devboot, or AOT cache.
 
 ## Testing
 
 ```sh
-JOLT_PWD="$PWD" /path/to/reviewed-jolt/bin/joltc -M:test
+JOLT_PWD="$PWD" /path/to/reviewed-jolt/bin/joltc \
+  -A:test -m hegel.install
+JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
+  /path/to/reviewed-jolt/bin/joltc -M:test
 ```
 
 The reviewed Jolt core is commit
-`ecf7728f15d8b8f858327c47dbd8b751eb36798c`; `deps.edn` pins `jolt.net` at
-`eabf9067f32d0f4c1673b5d84c24484943ea75c5`. Install the property layer once
-with the same compiler:
-
-```sh
-JOLT_PWD="$PWD" /path/to/reviewed-jolt/bin/joltc -A:test -m hegel.install
-```
+`85f645aa1178e4b631198dcbaf46bdad1283750b`; `deps.edn` pins the reviewed
+combined jolt-net W1/W2 revision
+`7de096d0f02f0f452124a110cbbd4f5b966f4c67`. The required-mode environment
+variable prevents a missing or unloadable libhegel from silently skipping the
+property layers.
 
 Three layers, all gated by the single `-M:test` command, which exits
 non-zero on any failure.
