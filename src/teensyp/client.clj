@@ -261,14 +261,14 @@
       (let [result
             (loop [[address & more] addresses
                    last-ex nil]
-              (when (>= ((:now ops)) deadline)
+              (when (deadline-expired? deadline (:now ops))
                 (throw (timeout-ex endpoint deadline last-ex)))
               (let [attempt-result
                     (try
                       {:attempt ((:try-connect ops) address socket-opts)}
                       (catch :default e {:error e}))]
                 (if-let [e (:error attempt-result)]
-                  (if (>= ((:now ops)) deadline)
+                  (if (deadline-expired? deadline (:now ops))
                     (throw (timeout-ex endpoint deadline e))
                     ;; Mirror jolt.net/try-connect's candidate-vector contract:
                     ;; every synchronous attempt failure is local to the
@@ -280,7 +280,7 @@
                   (let [attempt (:attempt attempt-result)
                         socket (:jolt.net/socket attempt)
                         status (:jolt.net/status attempt)]
-                    (if (>= ((:now ops)) deadline)
+                    (if (deadline-expired? deadline (:now ops))
                       (do
                         (retire-attempt! ops poller nil socket)
                         (throw (timeout-ex endpoint deadline last-ex)))
@@ -295,7 +295,7 @@
                           (let [token (:token token-result)]
                             (cond
                               (= net/connected status)
-                              (if (>= ((:now ops)) deadline)
+                              (if (deadline-expired? deadline (:now ops))
                                 (do
                                   (retire-attempt! ops poller token socket)
                                   (throw (timeout-ex endpoint deadline last-ex)))
@@ -308,11 +308,14 @@
                                     (try
                                       (loop []
                                         (let [now ((:now ops))]
-                                          (when (>= now deadline)
+                                          (when (and deadline
+                                                     (>= now deadline))
                                             (throw (timeout-ex endpoint deadline
                                                                last-ex)))
                                           (let [ready ((:await ops) poller
-                                                       (remaining-ms deadline now))]
+                                                       (if deadline
+                                                         (remaining-ms deadline now)
+                                                         wait-quantum-ms))]
                                             (if (empty? ready)
                                               (recur)
                                               (let [finished
@@ -328,7 +331,7 @@
                                     (if (= ::connect-timeout
                                            (:err (ex-data e)))
                                       (throw e)
-                                      (if (>= ((:now ops)) deadline)
+                                      (if (deadline-expired? deadline (:now ops))
                                         (throw (timeout-ex endpoint deadline e))
                                         (if (and (seq more)
                                                  (candidate-connect-error? e))
@@ -344,7 +347,7 @@
                                           "jolt.net returned an unknown completion status"
                                           {:teensyp.client/status completion})))
 
-                                    (>= ((:now ops)) deadline)
+                                    (deadline-expired? deadline (:now ops))
                                     (do
                                       (retire-attempt! ops poller token socket)
                                       (throw (timeout-ex endpoint deadline
@@ -373,18 +376,18 @@
   "Resolve exactly once and establish a non-blocking connection under deadline.
   Kept as a source-level seam for deterministic semantic tests."
   [endpoint socket-opts deadline ops]
-  (when (>= ((:now ops)) deadline)
+  (when (deadline-expired? deadline (:now ops))
     (throw (timeout-ex endpoint deadline nil)))
   (let [resolution
         (try
           {:addresses (vec ((:resolve ops) endpoint socket-opts))}
           (catch :default e {:error e}))]
     (if-let [e (:error resolution)]
-      (if (>= ((:now ops)) deadline)
+      (if (deadline-expired? deadline (:now ops))
         (throw (timeout-ex endpoint deadline e))
         (throw e))
       (let [addresses (:addresses resolution)]
-        (when (>= ((:now ops)) deadline)
+        (when (deadline-expired? deadline (:now ops))
           (throw (timeout-ex endpoint deadline nil)))
         (when (empty? addresses)
           (throw (invalid-ex :connect "endpoint resolved to no addresses"
@@ -652,22 +655,32 @@
                              ":deadline-nanos must be an integer"
                              {:teensyp.client/deadline-nanos deadline})))
         deadline)
-      (let [timeout (get opts :connect-timeout-ms
-                         default-connect-timeout-ms)]
-        (when-not (and (integer? timeout) (not (neg? timeout)))
-          (throw (invalid-ex :connect
-                             ":connect-timeout-ms must be a non-negative integer"
-                             {:teensyp.client/connect-timeout-ms timeout})))
-        (+ now (* timeout nanos-per-ms))))))
+      (let [timeout (if relative?
+                      (:connect-timeout-ms opts)
+                      default-connect-timeout-ms)]
+        (cond
+          (and relative? (nil? timeout))
+          nil
+
+          (and (integer? timeout) (not (neg? timeout)))
+          (+ now (* timeout nanos-per-ms))
+
+          :else
+          (throw (invalid-ex
+                   :connect
+                   ":connect-timeout-ms must be nil or a non-negative integer"
+                   {:teensyp.client/connect-timeout-ms timeout})))))))
 
 (defn connect-endpoint
   "Connect to a `jolt.net/endpoint` and return an opaque blocking connection.
 
   Options accepted by jolt.net (for example `:no-delay?` and
   `:recv-buffer-size`) pass through. Deadline policy is either
-  `:connect-timeout-ms` (default 30000) or an absolute `:deadline-nanos` in
-  `jolt.host/monotonic-nanos` units. The timeout covers resolution and every
-  resolver candidate; it is never restarted between candidates."
+  `:connect-timeout-ms` (default 30000), explicit
+  `:connect-timeout-ms nil` for an unbounded connect, or an absolute
+  `:deadline-nanos` in `jolt.host/monotonic-nanos` units. A bounded timeout
+  covers resolution and every resolver candidate; it is never restarted
+  between candidates."
   ([endpoint] (connect-endpoint endpoint {}))
   ([endpoint opts]
    (let [ops (real-connector-ops)

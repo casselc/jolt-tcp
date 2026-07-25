@@ -293,6 +293,36 @@
               (swap! events conj [:close owned])
               true)}))
 
+(deftest explicit-unbounded-connect-does-not-inherit-the-default-deadline
+  (is (= 30000000007
+         (@#'client/deadline-for {} 7)))
+  (is (= 7
+         (@#'client/deadline-for {:connect-timeout-ms 0} 7)))
+  (is (nil?
+        (@#'client/deadline-for {:connect-timeout-ms nil} 7)))
+  (let [clock (atom 0)
+        waits (atom [])
+        ops (fake-ops
+              {:clock clock
+               :resolve-result [:address]
+               :try-connect-fn
+               (fn [_ _]
+                 {:jolt.net/socket :socket
+                  :jolt.net/status net/in-progress})
+               :await-fn
+               (fn [timeout-ms]
+                 (swap! waits conj timeout-ms)
+                 ;; Advance well beyond the ordinary 30-second default. The
+                 ;; second turn reports readiness and must still complete.
+                 (swap! clock + 31000000000)
+                 (when (= 2 (count @waits))
+                   [{:events #{:write}}]))
+               :finish-fn (fn [_] net/connected)})
+        established (@#'client/establish! :endpoint {} nil ops)]
+    (is (= [1000 1000] @waits))
+    (is (= :socket (:socket established)))
+    (is (= :poller (:write-poller established)))))
+
 (deftest one-absolute-deadline-spans-all-candidates
   (let [clock (atom 0)
         events (atom [])

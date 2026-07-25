@@ -18,6 +18,11 @@ the same absolute monotonic deadline. Time consumed by a failed candidate
 therefore reduces the next candidate's wait; candidate advancement never
 restarts the caller's relative timeout.
 
+This claim is conditional on a finite deadline. An explicit
+`:connect-timeout-ms nil` selects unbounded connect policy and therefore has no
+deadline to preserve or connect-liveness bound to prove. Candidate/socket/poller
+ownership and cleanup obligations still apply in that mode.
+
 The negated query asks whether any wait differs from the remaining budget or
 whether bounded candidate work that consumes no more than each remaining budget
 can finish after the original deadline. The arithmetic model uses integral
@@ -159,6 +164,12 @@ The proof boundary does not claim operation liveness if a peer remains open but
 never becomes ready and the caller selects the default unbounded policy. A
 finite operation deadline bounds both gate acquisition and poll/retry work;
 closing the connection remains independent cancellation and wakes its pollers.
+Likewise, the connect-deadline theorem does not claim liveness when the caller
+explicitly selects `:connect-timeout-ms nil`; the deterministic
+`explicit-unbounded-connect-does-not-inherit-the-default-deadline` regression
+checks that this mode remains unbounded without weakening ownership cleanup.
 The operation rules above are executable contracts rather than an additional
-solver model. Windows remains unavailable until `jolt.net` supplies its
-non-blocking completion backend.
+solver model. Windows socket runtime remains unavailable until `jolt.net`
+supplies its non-blocking completion backend. Windows source-mode CI can still
+exercise the descriptor-independent buffer model; that is portable logic
+evidence, not evidence for these connection invariants.
