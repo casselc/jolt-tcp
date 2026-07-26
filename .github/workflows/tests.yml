@@ -133,14 +133,20 @@ jobs:
         run: |
           JOLT_PWD="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/jolt/bin/joltc" -M:test
 
-# The pinned jolt.net has reviewed Windows W1/W2 blocking and non-blocking byte
-# I/O, but no readiness backend. Keep native layers anyway: source-build Chez,
-# first exercise dependency-free TCP models and production namespace loading,
-# then install libhegel and run descriptor-independent buffer properties.
-# Requiring open-poller to fail closed keeps these claims distinct from real
-# client/server loopback coverage.
-  windows-portable:
-    name: portable TCP gate (Windows x86_64; no socket runtime)
+# The pinned jolt.net (W5) has a reviewed Windows x86-64 readiness backend, so
+# this runner exercises REAL loopback sockets, not just portable models.
+#
+# Three layers, deliberately ordered so coverage cannot silently vanish:
+#   1. a dependency-free runtime gate -- real accept/read/write, half-close,
+#      refused connects, deadlines, and stop/close waking a blocked readiness
+#      wait -- with no jolt-hegel and no installed artifact in the graph;
+#   2. the complete -M:test suite with JOLT_HEGEL_REQUIRED=1;
+#   3. the descriptor-independent buffer properties.
+# Layer 1 stays even though layer 2 subsumes it: if the optional test
+# dependency ever fails to resolve or install, Windows socket coverage must
+# still fail loudly rather than quietly disappear.
+  windows-runtime:
+    name: TCP runtime suite (Windows x86_64; real loopback)
     runs-on: windows-2022
     timeout-minutes: 30
     defaults:
@@ -207,7 +213,7 @@ jobs:
           submodules: recursive
           path: jolt
 
-      - name: Run dependency-free portable TCP contracts
+      - name: Run dependency-free TCP runtime contracts (real loopback)
         shell: powershell
         env:
           JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
@@ -216,8 +222,22 @@ jobs:
             -JoltTcpPath "$env:GITHUB_WORKSPACE" `
             -RuntimePath "$env:GITHUB_WORKSPACE\jolt" `
             -ChezExe "$env:GITHUB_WORKSPACE\chez-install\bin\scheme.exe" `
-            -TestAlias '-M:windows-portable-test' `
-            -TimeoutSeconds 180
+            -TestAlias '-M:windows-runtime-test' `
+            -TimeoutSeconds 300
+
+      - name: Install libhegel and run the complete test suite
+        shell: powershell
+        env:
+          JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
+          JOLT_HEGEL_REQUIRED: "1"
+        run: |
+          & "$env:GITHUB_WORKSPACE\tools\test-windows-source.ps1" `
+            -JoltTcpPath "$env:GITHUB_WORKSPACE" `
+            -RuntimePath "$env:GITHUB_WORKSPACE\jolt" `
+            -ChezExe "$env:GITHUB_WORKSPACE\chez-install\bin\scheme.exe" `
+            -TestAlias '-M:test' `
+            -InstallHegel `
+            -TimeoutSeconds 900
 
       - name: Install libhegel and run portable buffer properties
         shell: powershell
