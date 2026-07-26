@@ -222,8 +222,13 @@
   "Start one server around a whole run-test! call and keep it alive until the
   call returns — shrinking and final replay both need it."
   [opts f]
-  (let [port (+ 19200 (rand-int 400))
-        srv (tcp/run-server (assoc opts :port port :reuse-address? true))]
+  ;; Bind port 0 and use the port the kernel actually assigned. Drawing a
+  ;; random port from a fixed 400-wide range can collide with a lingering
+  ;; socket or a concurrent run; a case that then reached the wrong listener
+  ;; surfaced as an unexplained drain timeout rather than as the bind conflict
+  ;; it really was. Port 0 removes that failure class on every platform.
+  (let [srv (tcp/run-server (assoc opts :port 0 :reuse-address? true))
+        port (:port srv)]
     (Thread/sleep 250)                       ; readiness, once — not per case
     (try (f port) (finally (tcp/stop-server srv) (Thread/sleep 150)))))
 

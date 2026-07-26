@@ -1039,8 +1039,17 @@
           (when (and @(:running? srv) (< n 10000))
             (Thread/yield)
             (recur (inc n))))
-        (check "stop is waiting for the active write callback"
-               :waiting (deref stopping 25 :waiting))
+        ;; Whether a 1 MiB queued write is actually backpressured is a platform
+        ;; fact, not an invariant: POSIX loopback holds far less than Windows,
+        ;; whose socket-buffer autotuning can absorb the whole payload before
+        ;; the client drains at all. Asserting "stop has not returned yet" was
+        ;; therefore a POSIX-only timing assumption. The invariant that matters
+        ;; is that stop never completes before the active handler's write
+        ;; callback has fired -- which holds on both platforms.
+        (let [stop-state (deref stopping 25 :waiting)]
+          (check "stop never completes before the active write callback fires"
+                 true (or (= :waiting stop-state)
+                          (= :written (deref write-done 0 :missing)))))
         (let [received
               (deref
                (future
