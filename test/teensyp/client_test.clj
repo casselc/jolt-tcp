@@ -201,6 +201,10 @@
               (byte-array 1) 0 1)))
       (is (empty? @results)))))
 
+;; This block was previously a bare top-level `testing` form. It ran at namespace
+;; load time, where clojure.test's report counters are unbound, so every
+;; assertion inside it was silently discarded and no gate could observe it.
+(deftest native-reset-with-readiness-is-never-rewritten
   (testing "a native reset reported with readiness is never rewritten"
     (let [clock (atom 0)
           first? (atom true)
@@ -224,7 +228,7 @@
                #(>= (long @clock) deadline)
                #(operation-timeout! :receive deadline)
                (byte-array 1) 0 1))]
-      (is (identical? reset-error exception))))
+      (is (identical? reset-error exception)))))
 
 (deftest timed-gate-cancellation-cannot-steal-or-wedge-ownership
   (let [gate (@#'client/operation-gate)
