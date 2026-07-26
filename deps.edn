@@ -6,7 +6,7 @@
 
  :deps {io.github.casselc/jolt-net
         {:git/url "https://github.com/casselc/jolt-net.git"
-         :git/sha "7de096d0f02f0f452124a110cbbd4f5b966f4c67"}}
+         :git/sha "a4a4deb6b757d5e86aeb941cf646927e21420df6"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,
@@ -18,9 +18,14 @@
                   :main-opts ["-m" "teensyp.server-test"]}
            ;; Checked-in mains avoid joltc's currently POSIX-only stdin path on
            ;; native Windows while keeping each source-mode claim explicit.
-           :windows-portable-test
+           ;;
+           ;; The runtime gate deliberately declares no :extra-deps. Real
+           ;; Windows socket coverage must not be able to disappear because an
+           ;; optional test dependency failed to resolve or install; the
+           ;; Hegel-required suite is the separate :test lane.
+           :windows-runtime-test
            {:extra-paths ["test"]
-            :main-opts ["-m" "teensyp.windows-portable-test"]}
+            :main-opts ["-m" "teensyp.windows-runtime-test"]}
            :windows-buffer-property-test
            {:extra-paths ["test"]
             :extra-deps {io.github.chucklehead-dev/jolt-hegel

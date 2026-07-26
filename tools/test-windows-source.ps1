@@ -12,7 +12,8 @@ param(
   [string]$JoltTcpPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
   [string]$RuntimePath = "D:\src\jolt-proposal",
   [string]$ChezExe = "D:\chez-10.4.1\bin\scheme.exe",
-  [string]$TestAlias = "-M:windows-portable-test",
+  [string]$TestAlias = "-M:windows-runtime-test",
+  [string]$GitLibsPath = "",
   [switch]$InstallHegel,
   [int]$TimeoutSeconds = 180
 )
@@ -36,6 +37,22 @@ $env:JOLT_PWD = $JoltTcpPath
 $env:JOLT_AOT_CACHE = "0"
 $env:JOLT_VERSION = "dev"
 $env:JOLT_SH = "C:\Program Files\Git\bin\sh.exe"
+
+# Jolt derives its git cache from $HOME and falls back to a RELATIVE "./.jolt"
+# when HOME is unset, which native Windows shells routinely leave empty. That
+# relative path is then written under $JOLT_PWD but existence-checked against
+# the process working directory, which this script deliberately sets to the
+# runtime checkout -- so the ownership claim is published and then reported
+# missing, and dependency resolution fails before any test runs. Pinning
+# JOLT_GITLIBS to an absolute directory is the supported knob for this and
+# keeps the gate hermetic and independent of the ambient profile.
+if ([string]::IsNullOrWhiteSpace($GitLibsPath)) {
+  $GitLibsPath = Join-Path $JoltTcpPath ".jolt-cache\gitlibs"
+}
+if (-not (Test-Path $GitLibsPath)) {
+  $null = New-Item -ItemType Directory -Force -Path $GitLibsPath
+}
+$env:JOLT_GITLIBS = (Resolve-Path $GitLibsPath).Path
 
 function Invoke-Jolt {
   param(
@@ -85,6 +102,7 @@ Write-Host "  JOLT_PWD = $env:JOLT_PWD"
 Write-Host "  runtime  = $RuntimePath"
 Write-Host "  scheme   = $ChezExe"
 Write-Host "  alias    = $TestAlias"
+Write-Host "  gitlibs  = $env:JOLT_GITLIBS"
 Write-Host "  hegel    = $InstallHegel"
 Write-Host ""
 
