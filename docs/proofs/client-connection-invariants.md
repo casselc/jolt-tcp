@@ -169,7 +169,26 @@ explicitly selects `:connect-timeout-ms nil`; the deterministic
 `explicit-unbounded-connect-does-not-inherit-the-default-deadline` regression
 checks that this mode remains unbounded without weakening ownership cleanup.
 The operation rules above are executable contracts rather than an additional
-solver model. Windows socket runtime remains unavailable until `jolt.net`
-supplies its non-blocking completion backend. Windows source-mode CI can still
-exercise the descriptor-independent buffer model; that is portable logic
-evidence, not evidence for these connection invariants.
+solver model.
+
+As of the jolt-net W5 pin `a4a4deb6b757d5e86aeb941cf646927e21420df6`, Windows
+x86-64 supplies a reviewed readiness backend, so these connection invariants
+now have native Windows x86-64 runtime evidence:
+`teensyp.windows-runtime-test` runs the real `public-client-loopback-contract`
+alongside outbound connect, deadline, half-close/EOF, idempotent-close, and
+wake-a-blocked-waiter contracts over real loopback. No connection semantics
+changed to obtain that evidence, so the models above are unchanged and were
+deliberately not re-derived.
+
+One platform fact belongs next to the connect-deadline theorem: Windows reports
+a refused connect only after retransmitting the SYN (measured 2027-2046 ms on
+loopback, against sub-millisecond RST delivery on POSIX). A
+`:connect-timeout-ms` below that latency therefore yields
+`::client/connect-timeout` rather than `:connection-refused`. That is the
+deadline theorem behaving exactly as specified — one absolute deadline
+governing the whole attempt — not a classification defect.
+
+Windows aarch64 remains outside this boundary: `jolt.net` has no reviewed ARM64
+descriptor, so that lane exercises only the descriptor-independent buffer
+model. That is portable logic evidence, not evidence for these connection
+invariants.

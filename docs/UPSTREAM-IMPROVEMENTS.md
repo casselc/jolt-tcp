@@ -33,12 +33,18 @@ branch.
   byte-slice, poller, endpoint, and lifecycle APIs. It has no direct
   `jolt.ffi`, `pollfd`, `fcntl`, pipe-wake, errno, or native-layout code.
 - `deps.edn` pins `casselc/jolt-net` at
-  `7de096d0f02f0f452124a110cbbd4f5b966f4c67`. That CI follow-up to the reviewed
-  combined W1/W2 merge adds native POSIX descriptor validation without changing
-  its API. The branch combines Windows W1 blocking runtime and W2 non-blocking
-  byte-I/O evidence while preserving a fail-closed readiness boundary. It does
-  not claim Windows TCP loopback support; the exact revision's hosted platform
-  jobs remain candidate evidence until observed green.
+  `a4a4deb6b757d5e86aeb941cf646927e21420df6` (W5). That reviewed revision adds
+  the Windows x86-64 readiness backend — a WSAPoll poller with a datagram wake
+  transport — so `jolt.net/open-poller` now succeeds on Windows x86-64 instead
+  of failing closed with `:unsupported-target`. jolt-tcp required no API change
+  to consume it, which is the point: the layering held.
+- The previous pin, `7de096d0f02f0f452124a110cbbd4f5b966f4c67`, was a divergent
+  POSIX-evidence branch. Its inferred/probed target relabelling is deliberately
+  **not** carried over: jolt-tcp's API does not require it, and transplanting it
+  would merge two unrelated evidence lines.
+- Windows aarch64 is unchanged and is still not a runtime target. W5 promoted
+  only Windows x86-64; `jolt.net` has no reviewed ARM64 descriptor, so that
+  lane still requires target selection to fail closed.
 - The TCP layer retains only transport-neutral endpoint maps and the diagnostic
   descriptor. Stable ownership generation and stale-readiness rejection remain
   `jolt.net` invariants rather than being duplicated here.
@@ -54,6 +60,62 @@ branch.
   idempotent half/full close without exposing descriptors. Its separate proof
   record has SAT controls, corrected bounded-UNSAT checks, and executable
   semantic oracles.
+
+## Implementation update — 2026-07-25 (W6A, native Windows x86-64 runtime)
+
+Observed on native Windows x86-64 (Chez 10.4.1, Jolt core
+`85f645aa1178e4b631198dcbaf46bdad1283750b`, jolt-net W5 `a4a4deb`). Two
+findings below `jolt-tcp` are recorded here rather than worked around in the
+TCP layer.
+
+### Reportable to Jolt core: relative git cache path when `HOME` is unset
+
+`jolt.deps/gitlibs-dir` falls back to a **relative** `./.jolt/gitlibs` when
+neither `JOLT_GITLIBS` nor `GITLIBS` nor `HOME` is set. Native Windows shells
+routinely leave `HOME` empty. That relative path is then written under
+`$JOLT_PWD` but existence-checked against the *process working directory*,
+which any launcher that runs the compiler from the runtime checkout will have
+set elsewhere. `claim-cache-origin!` therefore publishes its ownership marker
+and immediately re-reads it as missing, and resolution dies with
+`:jolt.deps/git-cache-origin-mismatch` naming a marker that demonstrably exists
+on disk. The second attempt then fails differently, on the stale lock the first
+attempt left behind.
+
+This is a fail-closed check misfiring on a path-resolution inconsistency, not a
+real coordinate collision. The durable fix belongs upstream: either resolve the
+cache root to an absolute path once, or resolve every cache path against the
+same base. Until then `JOLT_GITLIBS` is the supported knob, and
+`tools/test-windows-source.ps1` now pins it to an absolute directory so the
+gate is hermetic and independent of the ambient profile.
+
+### Not a defect: Windows refused-connect latency
+
+A loopback connect to a closed port is classified *identically* to POSIX —
+`jolt.net` reports `#{:hangup :write :error}` and maps code 10061 to
+`:jolt.net/kind :connection-refused`. The difference is timing: Windows
+retransmits the SYN before reporting the refusal, measured at 2027-2046 ms
+across repeated native runs, where POSIX loopback fails on the RST in under a
+millisecond. Any `:connect-timeout-ms` shorter than that correctly expires as
+`::client/connect-timeout` first. No jolt.net or jolt-tcp change is warranted;
+callers simply need to size outbound connect deadlines for the platform, and
+the Windows runtime gate does.
+
+### Cross-platform test defects fixed in `jolt-tcp`
+
+- `teensyp.client-test` carried a bare top-level `testing` form. It ran at
+  namespace load, where `clojure.test`'s report counters are unbound, so every
+  assertion inside it was silently discarded and no gate could observe it. It is
+  now a real `deftest`.
+- The shutdown-drain acceptance test asserted that stop had *not* returned
+  within 25 ms, which is a POSIX-only assumption: whether a 1 MiB queued write
+  is backpressured depends on socket-buffer autotuning, and Windows can absorb
+  the whole payload before the client drains. It now asserts the invariant that
+  actually matters — stop never completes before the active write callback has
+  fired — which holds on both platforms.
+- The TCP property harness bound a random port from a fixed 400-wide range. A
+  case that reached a lingering or colliding listener surfaced as an
+  unexplained drain timeout rather than as the bind conflict it was. It now
+  binds port 0 and uses the kernel-assigned port.
 
 The remaining recommendations below should therefore be read as upstream
 capability rationale and historical workaround evidence. A workaround already

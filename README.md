@@ -171,9 +171,16 @@ delegate to the production `teensyp.client` surface.
   `:remote-address`, plus `:fd` for diagnostics only. The public TCP boundary
   does not expose `jolt.net`-namespaced data keys.
 - **Platform**: follows the readiness targets implemented by `jolt.net`;
-  currently Linux x86_64, Linux aarch64, macOS arm64, and macOS x86_64.
-  Windows readiness is a follow-up. Windows x86_64 and aarch64 source-mode
-  portable gates do not change that runtime boundary.
+  currently Linux x86_64, Linux aarch64, macOS arm64, macOS x86_64, and
+  Windows x86_64. Windows aarch64 remains a non-runtime preview: `jolt.net`
+  has no reviewed ARM64 descriptor, so target selection there still fails
+  closed and the client/server namespaces are never loaded.
+- **Refused connects on Windows**: a loopback connect to a closed port is
+  classified identically to POSIX (`:jolt.net/kind :connection-refused`,
+  code 10061), but Windows retransmits the SYN before reporting it, so the
+  refusal surfaces after roughly two seconds rather than immediately. A
+  `:connect-timeout-ms` shorter than that correctly expires as a timeout
+  first. Size outbound connect deadlines accordingly.
 
 ### CI platform coverage
 
@@ -185,14 +192,16 @@ delegate to the production `teensyp.client` surface.
   as candidate coverage until those jobs are observed green on this revision.
   Because libhegel 0.30.1 publishes no Darwin/x86_64 asset, the Intel job builds
   its exact tagged source and supplies the resulting library explicitly.
-- Windows x86_64 has candidate native layered gates. The first source-builds
-  Chez, loads the production TCP namespaces, runs the platform-independent
-  outbound-client models with no optional test dependency, and requires
-  `jolt.net/open-poller` to fail with `:unsupported-target`. The second installs
-  libhegel and runs the descriptor-independent buffer properties. The pinned
-  `jolt.net` includes reviewed W1/W2 blocking and non-blocking byte-I/O
-  substrate, but neither gate is **socket-runtime support**: no TCP
-  server/client loopback test is enabled until Windows readiness exists.
+- Windows x86_64 has native **socket-runtime** coverage over real loopback.
+  The pinned `jolt.net` W5 revision supplies a reviewed Windows readiness
+  backend, so `jolt.net/open-poller` now succeeds and the TCP server and
+  outbound client run against real sockets. The lane source-builds Chez and
+  then runs three layers: a dependency-free runtime gate
+  (`-M:windows-runtime-test`), the complete `-M:test` suite with
+  `JOLT_HEGEL_REQUIRED=1`, and the descriptor-independent buffer properties.
+  The runtime gate declares no optional test dependency on purpose — if
+  jolt-hegel ever fails to resolve or install, Windows socket coverage must
+  fail loudly rather than quietly disappear.
 - Windows aarch64 has a non-gating public-preview source-mode lane on
   `windows-11-vs2026-arm`. It builds native `tarm64nt` Chez 10.4.1 and runs the
   descriptor-independent `teensyp.buffer` property suite through the upstream
@@ -212,8 +221,9 @@ JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
 
 The reviewed Jolt core is commit
 `85f645aa1178e4b631198dcbaf46bdad1283750b`; `deps.edn` pins the reviewed
-combined jolt-net W1/W2 revision
-`7de096d0f02f0f452124a110cbbd4f5b966f4c67`. The required-mode environment
+jolt-net W5 revision
+`a4a4deb6b757d5e86aeb941cf646927e21420df6`, which adds the Windows x86-64
+readiness backend. The required-mode environment
 variable prevents a missing or unloadable libhegel from silently skipping the
 property layers.
 
