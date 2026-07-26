@@ -203,12 +203,27 @@ delegate to the production `teensyp.client` surface.
   jolt-hegel ever fails to resolve or install, Windows socket coverage must
   fail loudly rather than quietly disappear.
 - Windows aarch64 has a non-gating public-preview source-mode lane on
-  `windows-11-vs2026-arm`. It builds native `tarm64nt` Chez 10.4.1 and runs the
-  descriptor-independent `teensyp.buffer` property suite through the upstream
-  Windows ARM64 libhegel asset. Because jolt-net's newly probed ARM64 facts have
-  not yet been reviewed into a descriptor, this lane requires target selection
-  to fail closed and does not load the client/server namespaces. It uses no
-  packaged joltc, devboot, or AOT cache.
+  `windows-11-vs2026-arm` (`continue-on-error`). It builds native `tarm64nt`
+  Chez 10.4.1 and is intended to run the descriptor-independent
+  `teensyp.buffer` property suite through the upstream Windows ARM64 libhegel
+  asset. Because jolt-net has no reviewed ARM64 descriptor, this lane requires
+  target selection to fail closed and never loads the client/server
+  namespaces. It uses no packaged joltc, devboot, or AOT cache. **ARM64 is not
+  a runtime target and this lane is not evidence that it is.**
+
+  This lane has never yet completed. Its first execution (run
+  `30188457768`) is blocked before any test by an external libhegel-installer
+  limitation, not by jolt-tcp: `hegel.install` downloads
+  `libhegel-windows-arm64.dll`, then shells out to Windows PowerShell to
+  compute its digest, and that interpreter reports
+  `Get-FileHash : The term 'Get-FileHash' is not recognized`. The digest comes
+  back empty, so verification fails with
+  `:hegel.install/checksum-mismatch` against the expected
+  `6b17646d…`, and `JOLT_HEGEL_REQUIRED=1` correctly refuses to continue. The
+  fix belongs in the jolt-hegel installer — it should not depend on
+  `Microsoft.PowerShell.Utility` being resolvable in whatever PowerShell it
+  finds on an ARM64 host. Windows x86-64 is unaffected: the same installer
+  step succeeds there.
 
 ## Testing
 
