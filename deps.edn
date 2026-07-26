@@ -6,7 +6,11 @@
 
  :deps {io.github.casselc/jolt-net
         {:git/url "https://github.com/casselc/jolt-net.git"
-         :git/sha "a4a4deb6b757d5e86aeb941cf646927e21420df6"}}
+         ;; claude/monotonic-wake-cursor. Carries poller/wake-cursor and
+         ;; await-ready's three-argument arity, which the reactor loop below
+         ;; requires: on a4a4deb the reactor could park a full 1000 ms safety
+         ;; tick on a publication it had not observed.
+         :git/sha "64b15e0b5384692e5d0ab84806dd689a516e06a6"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,
@@ -23,6 +27,13 @@
            ;; Windows socket coverage must not be able to disappear because an
            ;; optional test dependency failed to resolve or install; the
            ;; Hegel-required suite is the separate :test lane.
+           ;; The re-arm latency scenario alone, so one jolt.net revision can be
+           ;; measured without running the whole suite. No :extra-deps: this is
+           ;; plain loopback TCP and must not be able to fail for a
+           ;; dependency-resolution reason.
+           :rearm-latency-test
+           {:extra-paths ["test"]
+            :main-opts ["-m" "teensyp.rearm-latency-main"]}
            :windows-runtime-test
            {:extra-paths ["test"]
             :main-opts ["-m" "teensyp.windows-runtime-test"]}

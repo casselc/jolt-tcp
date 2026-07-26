@@ -15,7 +15,8 @@
             ;; discovered by clojure.test/run-tests, the properties by run-properties!
             [teensyp.client-test]
             [teensyp.buffer-property-test]
-            [teensyp.server-property-test]))
+            [teensyp.server-property-test]
+            [teensyp.rearm-latency-test :as rearm]))
 
 (def ^:private failures (atom 0))
 
@@ -1169,6 +1170,19 @@
                nil (tcp/stop-server srv)))
       (finally (net/close! fd)))))
 
+(defn- test-reactor-rearm-latency
+  "Task W6A.1. See teensyp.rearm-latency-test for what this proves and, just as
+  importantly, what it does not: the timing-free proof lives in jolt-net's
+  test/jolt/net/wake_cursor_test.clj, and this is the real-loopback
+  corroboration."
+  []
+  (let [summary (rearm/run! check)]
+    (println (str "     " (:exchanges summary) " exchanges of "
+                  (:bytes-each summary) " bytes, "
+                  (:total-reads summary) " read cycles, median "
+                  (:median-ms summary) " ms, max "
+                  (:max-ms summary) " ms"))))
+
 (defn -main [& _]
   (println "== teensyp.server acceptance tests (jolt) ==")
   (test-echo)
@@ -1201,6 +1215,7 @@
   (test-stop-quiesces-active-handler-before-close)
   (test-repeated-start-stop-is-complete-and-idempotent)
   (test-stop-timeout-is-bounded-and-recoverable)
+  (test-reactor-rearm-latency)
 
   ;; Generative layers. The pure buffer properties run under clojure.test (via
   ;; hegel.clojure-test/with); the TCP properties use hegel.core/run-test!

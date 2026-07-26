@@ -976,14 +976,22 @@
   write callback from deadlocking cleanup."
   [srv]
   (loop []
-    (when (some #(flag? % WORKING) (vals @(:conns srv)))
-      (prepare-shutdown-active! srv)
-      (doseq [{:keys [token events]} (net/await-ready (:poller srv) 1000)]
-        (when-let [ctx (get @(:conns srv)
-                            (:jolt.net/generation token))]
-          (when (= token @(:token ctx))
-            (handle-shutdown-events! srv ctx events))))
-      (recur))))
+    ;; Same publication/drain/arm ordering as the main reactor loop, and it
+    ;; matters more here: this drain is what stop-server is waiting on, so a
+    ;; discarded wake adds a full 1000 ms tick to every shutdown that races a
+    ;; finishing handler. The cursor is sampled before BOTH reads below -- the
+    ;; WORKING scan and prepare-shutdown-active!'s own drain-pending! -- because
+    ;; a finish-work! publication can be missed by either.
+    (let [cursor (net/wake-cursor (:poller srv))]
+      (when (some #(flag? % WORKING) (vals @(:conns srv)))
+        (prepare-shutdown-active! srv)
+        (doseq [{:keys [token events]}
+                (net/await-ready (:poller srv) 1000 cursor)]
+          (when-let [ctx (get @(:conns srv)
+                              (:jolt.net/generation token))]
+            (when (= token @(:token ctx))
+              (handle-shutdown-events! srv ctx events))))
+        (recur)))))
 
 (defn- shutdown-and-await! [executor]
   (.shutdown executor)
@@ -1146,21 +1154,41 @@
       (deliver (:reactor-ready srv) {:ok true})
       (loop []
         (when @(:running? srv)
-          (with-running-admission srv #(process-pending! srv))
-          (when @(:running? srv)
-            (doseq [{:keys [token events]}
-                    (net/await-ready (:poller srv) 1000)]
-              (with-running-admission
-                srv
-                (fn []
-                  (if (= token @(:listener-token srv))
-                    (when (contains? events :read)
-                      (try (do-accept srv)
-                           (catch :default e (report-error srv e))))
-                    (when-let [ctx (get @(:conns srv)
-                                        (:jolt.net/generation token))]
-                      (when (= token @(:token ctx))
-                        (handle-conn-events srv ctx events))))))))
+          ;; Sample the wake cursor BEFORE draining :pending, and hand it to
+          ;; await-ready.
+          ;;
+          ;; A worker's finish-work! publishes its generation into :pending and
+          ;; only then calls net/wake!. If that lands after this turn's drain,
+          ;; the publication is real and unobserved -- yet it is already visible
+          ;; by the time await-ready is called, so an await that picks its OWN
+          ;; entry as the stale/fresh boundary consumes it as though this loop
+          ;; had seen it, and parks until jolt.net's 1000 ms native safety tick.
+          ;; That was the `base + k * ~1000 ms` latency jolt-http's backpressure
+          ;; property measured, and it is why the fix belongs here as well as in
+          ;; jolt.net: the poller cannot know where this loop's read began.
+          ;;
+          ;; The cursor moves the boundary to exactly that point. A wake at or
+          ;; below it was published before the drain and was therefore drained;
+          ;; a wake above it arms the wait instead of being discarded. Sampling
+          ;; it after the drain would restore the original bug, and checking
+          ;; :pending for emptiness just before awaiting would only narrow the
+          ;; window, not close it.
+          (let [cursor (net/wake-cursor (:poller srv))]
+            (with-running-admission srv #(process-pending! srv))
+            (when @(:running? srv)
+              (doseq [{:keys [token events]}
+                      (net/await-ready (:poller srv) 1000 cursor)]
+                (with-running-admission
+                  srv
+                  (fn []
+                    (if (= token @(:listener-token srv))
+                      (when (contains? events :read)
+                        (try (do-accept srv)
+                             (catch :default e (report-error srv e))))
+                      (when-let [ctx (get @(:conns srv)
+                                          (:jolt.net/generation token))]
+                        (when (= token @(:token ctx))
+                          (handle-conn-events srv ctx events)))))))))
           (recur))))
     (catch :default e
       (deliver (:reactor-ready srv) {:error e})

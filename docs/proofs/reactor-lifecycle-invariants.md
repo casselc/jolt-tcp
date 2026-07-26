@@ -474,6 +474,79 @@ Models:
 - [`flag-lock-current.pl`](models/flag-lock-current.pl)
 - [`flag-lock-faulty-control.pl`](models/flag-lock-faulty-control.pl)
 
+## 7. The reactor cannot park on work it has not observed
+
+Task W6A.1. `finish-work!` clears `WORKING`, calls `mark-pending!`, then
+`wake-server!`. The reactor's turn was `process-pending!` followed by
+`net/await-ready`. A publication landing between those two is real and
+unobserved — and yet it is already *visible* when `await-ready` is entered, so an
+await that picks its own entry as the stale/fresh boundary consumed it as though
+the reactor had already seen it, and then parked until `jolt.net`'s 1000 ms
+native safety tick.
+
+No bytes were ever lost: the tick delivered the same pending generation. The
+symptom was latency in whole multiples of about a second, which is what
+jolt-http's backpressure property measured (Hegel seed `9157075391771664454`,
+93,388 bytes, 1 KB read buffer).
+
+The fix has two halves and neither is sufficient alone. `jolt.net` gained
+`poller/wake-cursor` and a three-argument `await-ready` that refuses to discard
+any wake above the supplied cursor; see that repository's
+`wake-cursor-ordering-*.smt2`. This repository owes the other half: `reactor-loop`
+and `quiesce-handlers!` must sample the cursor **before** their own read of
+worker-owned state, because the poller cannot know where that read began.
+
+| Assertion | corrected | buggy |
+| --- | --- | --- |
+| cursor sampled before `drain-pending!` | yes | **no — sampled after** |
+| everything else, including jolt.net honouring the cursor | same | same |
+
+- [`reactor-cursor-ordering-corrected.smt2`](models/reactor-cursor-ordering-corrected.smt2)
+  is **unsat**. The unsat core names `reactor_samples_cursor_before_draining`,
+  so the ordering is load-bearing rather than incidental.
+- [`reactor-cursor-ordering-buggy.smt2`](models/reactor-cursor-ordering-buggy.smt2)
+  changes exactly that one assertion and is **sat**. The witness is the observed
+  interleaving on strictly distinct instants: drain `0`, `mark-pending!` `1`,
+  `wake!` `2`, cursor sample `3`, await `4` — the drain missed the work, the wake
+  sits at or below the cursor, the wait is unarmed.
+- [`reactor-cursor-ordering-nonvacuity.smt2`](models/reactor-cursor-ordering-nonvacuity.smt2)
+  is **sat** for the execution the fix must keep: the drain *did* observe the
+  work and the wait parks unarmed. This rules out a degenerate "always arm",
+  which would also make the corrected query unsat while turning every idle
+  reactor turn into a spin.
+
+Unlike the other models here these three carry their own `(check-sat)`, so they
+run under a standalone `z3` as well as under Chiasmus. Both were used and agreed
+on all three verdicts, the core, and the witness.
+
+The runtime counterpart is
+[`test/teensyp/rearm_latency_test.clj`](../../test/teensyp/rearm_latency_test.clj),
+and it is corroboration, not proof: the timing-free evidence is jolt-net's
+`test/jolt/net/wake_cursor_test.clj`, which hooks both the clock and the native
+`poll` call and asserts whether the wait was armed at native entry. What this
+repository adds is real bytes over a real socket through the real reactor —
+93,388 bytes per exchange through a 1 KB read buffer, with order-sensitive byte
+conservation checked on every exchange.
+
+Measured on Linux x86-64, `a4a4deb` (unfixed jolt.net) versus `64b15e0`:
+
+| | median | max | parked exchanges |
+| --- | --- | --- | --- |
+| unfixed, 4 batches of 20 | 77–91 ms | 1091 / 1098 / 1121 / **2102** ms | 1, 2, 0, 1 |
+| fixed, 3 batches of 60 | 82–92 ms | 134 / 207 / 201 ms | 0, 0, 0 |
+
+The 2102 ms exchange is two ticks in one exchange, matching the reported
+`base + k * ~1000 ms` shape. Two facts about the reproduction are worth
+recording because they are easy to get wrong:
+
+- It needs an **otherwise-idle** reactor. A batch run against one warm server
+  never parked, because a continuously readable socket makes `poll` return on
+  readiness and the lost wake is simply masked. Each exchange therefore gets a
+  freshly started server.
+- At roughly 5% per exchange, a batch of 20 came up clean once. The committed
+  batch is 60, and the check is stated as "did any exchange take a whole safety
+  tick", not as a throughput budget.
+
 ## Reproduction record
 
 The new SMT files contain no `(check-sat)`, `(get-model)`, or solver-specific
@@ -513,6 +586,27 @@ task-tracker-retention-buggy.smt2        sat
 task-tracker-retention-corrected.smt2    unsat
 task-tracker-retention-nonvacuity.smt2   sat
 ```
+
+Task W6A.1 added three files, bringing the directory to 31 SMT models plus the
+two Prolog files. Unlike the 22 above, these three carry their own `(check-sat)`
+and `(get-model)`/`(get-unsat-core)`, so they were run BOTH ways and the two
+oracles agreed:
+
+```text
+z3 4.8.12, invoked directly on the file
+  reactor-cursor-ordering-corrected.smt2   unsat
+  reactor-cursor-ordering-buggy.smt2       sat
+  reactor-cursor-ordering-nonvacuity.smt2  sat
+
+mcp__chiasmus.chiasmus_verify(solver="z3", ...)
+  reactor-cursor-ordering-corrected.smt2   unsat
+  reactor-cursor-ordering-buggy.smt2       sat
+  reactor-cursor-ordering-nonvacuity.smt2  sat
+```
+
+The other 28 SMT files were additionally re-run under the same standalone z3 on
+this task (appending a `(check-sat)` for those written without one, without
+modifying the committed files). Every verdict matched the table above.
 
 The runtime gate remains:
 
