@@ -17,15 +17,21 @@ The vendored [`stdlib/jolt/ffi.clj`](../refs/jolt/stdlib/jolt/ffi.clj) remains a
 thin macro surface over host-provided primitives. Recheck every claim against
 the exact upstream SHA before removing a workaround.
 
-The reviewed Jolt proposal fork is now published only to `casselc/jolt` on
-`codex/upstream-improvements-6-8`; nothing has been pushed to the upstream
-project's origin and no pull request has been opened. The exact core revision
-used here is `85f645aa1178e4b631198dcbaf46bdad1283750b`. It includes scoped
-byte-array ranges introduced at `1c8fdb97`, Windows path correction at
-`358c42b7`, and the variadic FFI boundary introduced at `ecf7728f`. The
-known-unsound runtime AOT prototype remains isolated on
-`research/aot-v5-prototype` at `21062d5b` and is not part of the proposal
-branch.
+The reviewed Jolt proposal fork is published only to `casselc/jolt`, now
+rebased over upstream v0.5.4 on `codex/upstream-rebase-2026-07-26`; nothing has
+been pushed to the upstream project's origin and no pull request has been
+opened. The exact current core revision is
+`89fe46e8a826b60b69d264fab76c864881055830`. It retains scoped byte-array
+ranges at rebased commit `701c5ca5`, Windows path correction, and the variadic
+FFI boundary at rebased commit `339534c7`. The per-namespace runtime AOT design
+remains excluded from the active loader because it cannot replay downstream
+top-level effects; the fork's fresh-process gate requires both processes to
+replay those effects and create no namespace-cache artifacts.
+
+The current dependency pin is jolt-net
+`bd9865c3e6c73f8ec3dcfad8c00f718bd1973c46`. It retains W1-W5 Windows support
+and the W6A.1 monotonic wake cursor while pinning its own hosted matrix to the
+same rebased core.
 
 ## Implementation update — 2026-07-24
 

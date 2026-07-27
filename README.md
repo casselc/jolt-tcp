@@ -228,17 +228,16 @@ delegate to the production `teensyp.client` surface.
 ## Testing
 
 ```sh
-JOLT_PWD="$PWD" /path/to/reviewed-jolt/bin/joltc \
+JOLT_PWD="$PWD" /path/to/reviewed-jolt/bin/jolt \
   -A:test -m hegel.install
 JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
-  /path/to/reviewed-jolt/bin/joltc -M:test
+  /path/to/reviewed-jolt/bin/jolt -M:test
 ```
 
-The reviewed Jolt core is commit
-`85f645aa1178e4b631198dcbaf46bdad1283750b`; `deps.edn` pins the reviewed
-jolt-net W5 revision
-`a4a4deb6b757d5e86aeb941cf646927e21420df6`, which adds the Windows x86-64
-readiness backend. The required-mode environment
+The reviewed Jolt core is the upstream-v0.5.4 rebase at
+`89fe46e8a826b60b69d264fab76c864881055830`; `deps.edn` pins jolt-net at
+`bd9865c3e6c73f8ec3dcfad8c00f718bd1973c46`, which includes the Windows x86-64
+readiness backend and monotonic wake-cursor repair. The required-mode environment
 variable prevents a missing or unloadable libhegel from silently skipping the
 property layers.
 
