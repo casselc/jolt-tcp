@@ -1,10 +1,11 @@
 (ns teensyp.windows-runtime-test
-  "Native Windows x86-64 socket-runtime gate for jolt-tcp.
+  "Native Windows socket-runtime gate for jolt-tcp.
 
   Replaces the former `teensyp.windows-portable-test`, whose central assertion
   was that `jolt.net/open-poller` fails closed on Windows. The pinned jolt-net
-  W5 revision ships a reviewed Windows readiness backend, so that assertion is
-  obsolete: this gate instead requires real loopback sockets to work.
+  revision ships reviewed Windows readiness backends for x86-64 and aarch64,
+  so that assertion is obsolete: this gate instead requires real loopback
+  sockets to work on the exact architecture named by JOLT_EXPECTED_ARCH.
 
   Deliberately dependency-free. It requires only the production namespaces and
   `clojure.test`, never jolt-hegel and never an installed native artifact, so
@@ -292,12 +293,21 @@
        (sort-by #(str (:name (meta %))))))
 
 (defn -main [& _]
-  (let [observed (jolt.host/target)]
-    (when-not (= [:windows :x86-64 64]
+  (let [expected-name (System/getenv "JOLT_EXPECTED_ARCH")
+        expected-arch (case expected-name
+                        "x86-64" :x86-64
+                        "aarch64" :aarch64
+                        (throw
+                          (ex-info
+                            "JOLT_EXPECTED_ARCH must be x86-64 or aarch64"
+                            {:value expected-name})))
+        observed (jolt.host/target)]
+    (when-not (= [:windows expected-arch 64]
                  [(:os observed) (:arch observed) (:pointer-bits observed)])
       (throw
-        (ex-info "Windows runtime gate did not run on native Windows x86-64"
-                 {:target observed})))
+        (ex-info "Windows runtime gate ran on the wrong native target"
+                 {:expected [:windows expected-arch 64]
+                  :target observed})))
 
     ;; A readiness poller must now really open. The predecessor gate asserted
     ;; the opposite; keeping an explicit positive check makes the W5 promotion
