@@ -1,0 +1,5 @@
+# actionlint 1.7.12 predates this GitHub-hosted public-preview label. GitHub's
+# current runner documentation lists it alongside windows-11-arm.
+self-hosted-runner:
+  labels:
+    - windows-11-vs2026-arm
