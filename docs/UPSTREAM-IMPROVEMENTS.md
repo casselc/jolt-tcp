@@ -21,7 +21,7 @@ The reviewed Jolt proposal fork is published only to `casselc/jolt`, now
 rebased over upstream v0.5.7 on `codex/upstream-rebase-v0.5.7`; nothing has
 been pushed to the upstream project's origin and no pull request has been
 opened. The exact current core revision is
-`46e1f74fc14f29283586900ef4b98c45375c0500`. It retains the reviewed FFI and
+`8a208a82fd39425e701a00906cd5d207da12f1ec`. It retains the reviewed FFI and
 byte-range primitives, the portable git-dependency diagnostics, and the
 fresh-process namespace-cache gate. The per-namespace runtime AOT design
 remains excluded from the active loader because it cannot replay downstream

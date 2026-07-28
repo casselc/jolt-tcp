@@ -215,7 +215,7 @@ JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
 ```
 
 The reviewed Jolt core is the upstream-v0.5.7 rebase at
-`46e1f74fc14f29283586900ef4b98c45375c0500`; `deps.edn` pins jolt-net at
+`8a208a82fd39425e701a00906cd5d207da12f1ec`; `deps.edn` pins jolt-net at
 `c3747385235df812e0d739a3e9f71c4dfb07b474`, which includes the reviewed
 Winsock readiness backend on x86_64 and aarch64, the monotonic wake-cursor
 repair, and count-based Windows handle-leak gates. Test aliases pin the public
