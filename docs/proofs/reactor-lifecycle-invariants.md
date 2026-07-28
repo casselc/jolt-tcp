@@ -608,6 +608,24 @@ The other 28 SMT files were additionally re-run under the same standalone z3 on
 this task (appending a `(check-sat)` for those written without one, without
 modifying the committed files). Every verdict matched the table above.
 
+### Revalidation after Windows aarch64 promotion (2026-07-27)
+
+The Windows aarch64 promotion changes dependency pins, target evidence, and CI
+selection; `git diff f0e7338..e27d5c7 -- src` is empty. It therefore adds no
+TCP transition, state, or violation predicate to these models. The native
+Winsock layout/readiness premises are discharged by the pinned jolt-net probe
+and runtime gates rather than copied into this platform-neutral TCP model.
+
+All 31 SMT files were re-run under standalone Z3 4.8.12: 21 expected SAT
+controls/non-vacuity models, 10 expected bounded-UNSAT corrected models, and
+zero verdict mismatches. The cursor-ordering corrected, buggy, and non-vacuity
+trio was also linted and re-verified through Chiasmus. The corrected query was
+UNSAT with the source-ordering, drain-observation, cursor freshness, poller
+arming, and violation assertions in its core; the buggy query reproduced
+`drain=0, mark=1, wake=2, sample=3, await=4`; and the non-vacuity query remained
+SAT. This is a revalidation of unchanged bounded models, not a claim that the
+solver proves the native ABI or scheduler.
+
 The runtime gate remains:
 
 ```sh

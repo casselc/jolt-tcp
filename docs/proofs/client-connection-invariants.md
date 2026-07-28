@@ -171,14 +171,22 @@ checks that this mode remains unbounded without weakening ownership cleanup.
 The operation rules above are executable contracts rather than an additional
 solver model.
 
-As of the jolt-net W5 pin `a4a4deb6b757d5e86aeb941cf646927e21420df6`, Windows
-x86-64 supplies a reviewed readiness backend, so these connection invariants
-now have native Windows x86-64 runtime evidence:
+As of the jolt-net pin `c3747385235df812e0d739a3e9f71c4dfb07b474`, Windows
+x86-64 and aarch64 supply the same reviewed readiness backend, so these
+connection invariants have native runtime evidence on both architectures:
 `teensyp.windows-runtime-test` runs the real `public-client-loopback-contract`
 alongside outbound connect, deadline, half-close/EOF, idempotent-close, and
-wake-a-blocked-waiter contracts over real loopback. No connection semantics
-changed to obtain that evidence, so the models above are unchanged and were
-deliberately not re-derived.
+wake-a-blocked-waiter contracts over real loopback. Hosted run
+[30322363564](https://github.com/casselc/jolt-tcp/actions/runs/30322363564)
+passed 24 tests and 151 assertions in that dependency-free gate on each
+Windows architecture, with no failures or errors.
+
+No connection semantics changed to obtain that evidence: the platform update's
+diff is empty under `src/`. The target-sensitive layout and readiness premises
+are discharged by jolt-net's committed native probes and gates, while this
+document's TCP ownership/deadline models remain platform-neutral. The models
+above therefore apply unchanged; duplicating them with an architecture label
+would add no new premise or counterexample.
 
 One platform fact belongs next to the connect-deadline theorem: Windows reports
 a refused connect only after retransmitting the SYN (measured 2027-2046 ms on
@@ -188,7 +196,7 @@ loopback, against sub-millisecond RST delivery on POSIX). A
 deadline theorem behaving exactly as specified — one absolute deadline
 governing the whole attempt — not a classification defect.
 
-Windows aarch64 remains outside this boundary: `jolt.net` has no reviewed ARM64
-descriptor, so that lane exercises only the descriptor-independent buffer
-model. That is portable logic evidence, not evidence for these connection
-invariants.
+Windows aarch64 evidence is source-runtime only: native `tarm64nt` Chez 10.4.1,
+source-mode Jolt, and AOT disabled. It proves that the public TCP contracts run
+on real ARM64 loopback sockets; it does not claim a packaged ARM64 `joltc` or
+AOT image.

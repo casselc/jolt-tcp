@@ -6,7 +6,7 @@ not an upstream issue tracker.
 
 ## Verification baseline
 
-Revalidated 2026-07-23 against:
+Revalidated 2026-07-27 against:
 
 - installed `joltc v0.4.15`;
 - the Jolt checkout in [`refs/jolt`](../refs/jolt), commit
@@ -18,27 +18,52 @@ thin macro surface over host-provided primitives. Recheck every claim against
 the exact upstream SHA before removing a workaround.
 
 The reviewed Jolt proposal fork is published only to `casselc/jolt`, now
-rebased over upstream v0.5.4 on `codex/upstream-rebase-2026-07-26`; nothing has
+rebased over upstream v0.5.7 on `codex/upstream-rebase-v0.5.7`; nothing has
 been pushed to the upstream project's origin and no pull request has been
 opened. The exact current core revision is
-`89fe46e8a826b60b69d264fab76c864881055830`. It retains scoped byte-array
-ranges at rebased commit `701c5ca5`, Windows path correction, and the variadic
-FFI boundary at rebased commit `339534c7`. The per-namespace runtime AOT design
+`46e1f74fc14f29283586900ef4b98c45375c0500`. It retains the reviewed FFI and
+byte-range primitives, the portable git-dependency diagnostics, and the
+fresh-process namespace-cache gate. The per-namespace runtime AOT design
 remains excluded from the active loader because it cannot replay downstream
-top-level effects; the fork's fresh-process gate requires both processes to
-replay those effects and create no namespace-cache artifacts.
+top-level effects.
 
 The current dependency pin is jolt-net
-`bd9865c3e6c73f8ec3dcfad8c00f718bd1973c46`. It retains W1-W5 Windows support
-and the W6A.1 monotonic wake cursor while pinning its own hosted matrix to the
-same rebased core.
+`c3747385235df812e0d739a3e9f71c4dfb07b474`. It retains the W1-W4 Windows
+socket stack and W6A.1 monotonic wake cursor, adds reviewed aarch64 descriptors,
+and replaces allocator-value leak heuristics with a count-based Windows process
+handle oracle.
+
+## Implementation update — 2026-07-27 (Windows aarch64 runtime)
+
+- Windows aarch64 now runs the same real-loopback socket contracts as Windows
+  x86_64. No `jolt-tcp` production source changed: the diff from `f0e7338` to
+  the tested revision is empty under `src/`; target selection, Winsock layout,
+  readiness, wake transport, and native-handle ownership remain `jolt.net`
+  responsibilities.
+- Hosted run
+  [30322363564](https://github.com/casselc/jolt-tcp/actions/runs/30322363564)
+  is green on Linux x86_64/aarch64, macOS arm64/x86_64, and Windows
+  x86_64/aarch64. Each Windows architecture passed the dependency-free runtime
+  contracts (24 tests, 151 assertions), the complete Hegel-required suite
+  (29 tests, 123 assertions plus six TCP property groups), and the portable
+  buffer properties (14 tests, 21 assertions), all with zero failures/errors.
+- The ARM64 job asserts the hosted runner architecture and native
+  `tarm64nt` Chez 10.4.1 before loading Jolt. It is source-runtime evidence with
+  AOT disabled, not packaged-`joltc` or AOT-image evidence.
+- Test aliases resolve jolt-hegel from its public `chucklehead-dev` repository
+  at `defab7f4385bf9409cae8e512defa3d60c8d926a`. Its in-process SHA-256/CNG
+  path removes the former PowerShell `Get-FileHash` dependency on Windows
+  ARM64 while preserving fail-closed checksum verification.
+- The platform promotion changes dependency selection and evidence, not TCP
+  lifecycle semantics. The existing TCP models therefore apply unchanged;
+  no architecture-specific duplicate model is warranted.
 
 ## Implementation update — 2026-07-24
 
 - `jolt-tcp` production code now consumes the public `jolt.net` owned-handle,
   byte-slice, poller, endpoint, and lifecycle APIs. It has no direct
   `jolt.ffi`, `pollfd`, `fcntl`, pipe-wake, errno, or native-layout code.
-- `deps.edn` pins `casselc/jolt-net` at
+- At that checkpoint, `deps.edn` pinned `casselc/jolt-net` at
   `a4a4deb6b757d5e86aeb941cf646927e21420df6` (W5). That reviewed revision adds
   the Windows x86-64 readiness backend — a WSAPoll poller with a datagram wake
   transport — so `jolt.net/open-poller` now succeeds on Windows x86-64 instead
@@ -48,9 +73,8 @@ same rebased core.
   POSIX-evidence branch. Its inferred/probed target relabelling is deliberately
   **not** carried over: jolt-tcp's API does not require it, and transplanting it
   would merge two unrelated evidence lines.
-- Windows aarch64 is unchanged and is still not a runtime target. W5 promoted
-  only Windows x86-64; `jolt.net` has no reviewed ARM64 descriptor, so that
-  lane still requires target selection to fail closed.
+- At that W5 checkpoint Windows aarch64 was not yet a runtime target. The
+  2026-07-27 update above supersedes that boundary with native ARM64 evidence.
 - The TCP layer retains only transport-neutral endpoint maps and the diagnostic
   descriptor. Stable ownership generation and stale-readiness rejection remain
   `jolt.net` invariants rather than being duplicated here.

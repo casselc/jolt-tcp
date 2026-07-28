@@ -172,9 +172,8 @@ delegate to the production `teensyp.client` surface.
   does not expose `jolt.net`-namespaced data keys.
 - **Platform**: follows the readiness targets implemented by `jolt.net`;
   currently Linux x86_64, Linux aarch64, macOS arm64, macOS x86_64, and
-  Windows x86_64. Windows aarch64 remains a non-runtime preview: `jolt.net`
-  has no reviewed ARM64 descriptor, so target selection there still fails
-  closed and the client/server namespaces are never loaded.
+  Windows x86_64 and aarch64. Both Windows architectures use the same
+  `jolt.net` WSAPoll backend and owner-independent datagram wake transport.
 - **Refused connects on Windows**: a loopback connect to a closed port is
   classified identically to POSIX (`:jolt.net/kind :connection-refused`,
   code 10061), but Windows retransmits the SYN before reporting it, so the
@@ -184,46 +183,27 @@ delegate to the production `teensyp.client` surface.
 
 ### CI platform coverage
 
-- Linux x86_64 and macOS arm64 have observed native runtime evidence for the
-  complete reactor, real-loopback acceptance, outbound-client, and property
-  suites with source-built Chez 10.4.1.
-- Linux aarch64 (`ubuntu-24.04-arm`) and macOS x86_64
-  (`macos-15-intel`) have equivalent full-runtime jobs configured. Treat both
-  as candidate coverage until those jobs are observed green on this revision.
-  Because libhegel 0.30.1 publishes no Darwin/x86_64 asset, the Intel job builds
-  its exact tagged source and supplies the resulting library explicitly.
-- Windows x86_64 has native **socket-runtime** coverage over real loopback.
-  The pinned `jolt.net` W5 revision supplies a reviewed Windows readiness
-  backend, so `jolt.net/open-poller` now succeeds and the TCP server and
-  outbound client run against real sockets. The lane source-builds Chez and
-  then runs three layers: a dependency-free runtime gate
-  (`-M:windows-runtime-test`), the complete `-M:test` suite with
-  `JOLT_HEGEL_REQUIRED=1`, and the descriptor-independent buffer properties.
-  The runtime gate declares no optional test dependency on purpose — if
-  jolt-hegel ever fails to resolve or install, Windows socket coverage must
-  fail loudly rather than quietly disappear.
-- Windows aarch64 has a non-gating public-preview source-mode lane on
-  `windows-11-vs2026-arm` (`continue-on-error`). It builds native `tarm64nt`
-  Chez 10.4.1 and is intended to run the descriptor-independent
-  `teensyp.buffer` property suite through the upstream Windows ARM64 libhegel
-  asset. Because jolt-net has no reviewed ARM64 descriptor, this lane requires
-  target selection to fail closed and never loads the client/server
-  namespaces. It uses no packaged joltc, devboot, or AOT cache. **ARM64 is not
-  a runtime target and this lane is not evidence that it is.**
-
-  This lane has never yet completed. Its first execution (run
-  `30188457768`) is blocked before any test by an external libhegel-installer
-  limitation, not by jolt-tcp: `hegel.install` downloads
-  `libhegel-windows-arm64.dll`, then shells out to Windows PowerShell to
-  compute its digest, and that interpreter reports
-  `Get-FileHash : The term 'Get-FileHash' is not recognized`. The digest comes
-  back empty, so verification fails with
-  `:hegel.install/checksum-mismatch` against the expected
-  `6b17646d…`, and `JOLT_HEGEL_REQUIRED=1` correctly refuses to continue. The
-  fix belongs in the jolt-hegel installer — it should not depend on
-  `Microsoft.PowerShell.Utility` being resolvable in whatever PowerShell it
-  finds on an ARM64 host. Windows x86-64 is unaffected: the same installer
-  step succeeds there.
+- Linux x86_64/aarch64 and macOS arm64/x86_64 have observed native runtime
+  evidence for the complete reactor, real-loopback acceptance, outbound-client,
+  and property suites with Chez 10.4.1. Because libhegel 0.30.1 publishes no
+  Darwin/x86_64 asset, the Intel job builds its exact tagged source and supplies
+  the resulting library explicitly.
+- Windows x86_64 and aarch64 have equivalent native **socket-runtime** coverage
+  over real loopback. Each architecture runs three layers: a dependency-free
+  runtime gate (`-M:windows-runtime-test`: 24 tests, 151 assertions), the
+  complete `-M:test` suite with `JOLT_HEGEL_REQUIRED=1` (29 tests, 123
+  assertions, plus all six TCP property groups), and the portable buffer
+  properties (14 tests, 21 assertions). All reported zero failures and errors
+  in hosted run
+  [30322363564](https://github.com/casselc/jolt-tcp/actions/runs/30322363564).
+  The dependency-free gate intentionally declares no optional test dependency:
+  socket coverage cannot disappear because Hegel failed to resolve or install.
+- Windows aarch64 is source-runtime evidence on
+  `windows-11-vs2026-arm`: native `tarm64nt` Chez 10.4.1, source-mode Jolt,
+  and AOT disabled. It is evidence for real ARM64 loopback sockets, but not for
+  a packaged ARM64 `joltc` or AOT image. The former `Get-FileHash` blocker is
+  resolved by the pinned public jolt-hegel revision, whose installer hashes
+  in-process and uses Windows CNG when available.
 
 ## Testing
 
@@ -234,10 +214,13 @@ JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
   /path/to/reviewed-jolt/bin/jolt -M:test
 ```
 
-The reviewed Jolt core is the upstream-v0.5.4 rebase at
-`89fe46e8a826b60b69d264fab76c864881055830`; `deps.edn` pins jolt-net at
-`bd9865c3e6c73f8ec3dcfad8c00f718bd1973c46`, which includes the Windows x86-64
-readiness backend and monotonic wake-cursor repair. The required-mode environment
+The reviewed Jolt core is the upstream-v0.5.7 rebase at
+`46e1f74fc14f29283586900ef4b98c45375c0500`; `deps.edn` pins jolt-net at
+`c3747385235df812e0d739a3e9f71c4dfb07b474`, which includes the reviewed
+Winsock readiness backend on x86_64 and aarch64, the monotonic wake-cursor
+repair, and count-based Windows handle-leak gates. Test aliases pin the public
+jolt-hegel integration at
+`defab7f4385bf9409cae8e512defa3d60c8d926a`. The required-mode environment
 variable prevents a missing or unloadable libhegel from silently skipping the
 property layers.
 
