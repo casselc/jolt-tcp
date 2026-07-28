@@ -632,10 +632,56 @@ The runtime gate remains:
 joltc -M:test
 ```
 
+### Revalidation after strict core timed waits (2026-07-28)
+
+The shared immutable Chez toolchain migration exposed a dependency invariant
+that the TCP models had previously assumed rather than owned. The initial
+six-target run at TCP revision
+`f571c3b725753c54acd656400a546ae640965423` passed, but a same-SHA warm-cache
+rerun failed `stop timeout is reported structurally` on both macOS
+architectures. The close arity had started and deliberately remained active
+beyond the 25 ms stop deadline, yet core timed deref returned its eventual
+value instead of the timeout sentinel.
+
+The cache did not change the source or dependency graph. It changed scheduling
+pressure enough to expose Jolt core's post-timeout mutex-reacquisition race:
+after Chez `condition-wait` returned false, future/promise deref and agent
+`await-for` performed one final state check. A producer completing after the
+deadline but acquiring the mutex before the waiter reacquired it could
+retroactively turn timeout into success.
+
+That contract now belongs to Jolt core revision
+`8a208a82fd39425e701a00906cd5d207da12f1ec`. Its deterministic forced-schedule
+gate, public future/promise/agent tests, and
+`timed-deref-deadline-{buggy,corrected,nonvacuity}.smt2` models establish that a
+false timed condition wait is terminal for the current observation while
+preserving ready-at-entry and pre-deadline success.
+
+This repository changed only its CI core pin and documentation. The diff from
+`911cf783d56e988adb2b8f716b6636fae5454e52` through
+`1a6ce8c670d23de84dce643a9179955546cca9b8` is empty under `src/` and `test/`;
+no TCP transition, timeout, retry, or assertion was changed. The complete
+six-target suite then passed twice at that exact revision:
+
+- [run 30404634191, attempt 1](https://github.com/casselc/jolt-tcp/actions/runs/30404634191/attempts/1);
+  and
+- [run 30404634191, attempt 2](https://github.com/casselc/jolt-tcp/actions/runs/30404634191/attempts/2).
+
+Both attempts used the shared immutable Chez 10.4.1 archives and passed Linux
+x86_64/aarch64, macOS arm64/x86_64, and native Windows x86_64/aarch64. The
+macOS assertion that exposed the race passed without widening its 25 ms
+deadline. The existing TCP lifecycle models therefore need no rederivation:
+their local state transitions are unchanged. They now cite strict core
+timed-wait result selection as an explicit dependency premise rather than
+silently treating it as part of the TCP proof.
+
 ## Remaining semantic gaps
 
 - `jolt.net` token, lease, and idempotent-close correctness is a dependency
   invariant, not re-proved by the TCP models.
+- Structured TCP timeout observations assume the pinned Jolt core's strict
+  timed-wait contract. The TCP models do not re-prove the Chez
+  condition-variable implementation or scheduler.
 - Handler admission is observed only at `submit-marked-handler!` return.
   Direct-executor gate re-entry is modelled, but accepted-task scheduling and
   termination for arbitrary executors remain separate assumptions.

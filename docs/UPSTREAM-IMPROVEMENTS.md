@@ -33,6 +33,28 @@ socket stack and W6A.1 monotonic wake cursor, adds reviewed aarch64 descriptors,
 and replaces allocator-value leak heuristics with a count-based Windows process
 handle oracle.
 
+## Implementation update — 2026-07-28 (strict timed waits)
+
+- A cold six-target run of the shared immutable Chez 10.4.1 toolchain passed at
+  TCP revision `f571c3b`, while a same-SHA warm rerun failed the same bounded
+  stop assertion on macOS arm64 and x86_64. The source and dependency graph were
+  unchanged; cache warmth exposed a scheduling race rather than corrupting the
+  toolchain.
+- The defect was in Jolt core's timed future/promise deref and agent
+  `await-for`: after Chez reported timeout, a final state check could accept a
+  completion published after the deadline while the waiter was reacquiring the
+  mutex. Core revision `8a208a82` makes a false timed condition wait terminal
+  for that observation and adds deterministic, public-API, and SMT evidence.
+- jolt-tcp changed no production source, test, timeout, or retry. It only
+  repinned the reviewed core. Hosted
+  [run 30404634191](https://github.com/casselc/jolt-tcp/actions/runs/30404634191)
+  then passed twice at the exact TCP revision `1a6ce8c` on Linux
+  x86_64/aarch64, macOS arm64/x86_64, and Windows x86_64/aarch64.
+- The TCP lifecycle proofs remain valid without rederivation because their
+  state transitions did not change. Strict timed-wait result selection is now
+  recorded as a core dependency premise in
+  [`reactor-lifecycle-invariants.md`](proofs/reactor-lifecycle-invariants.md).
+
 ## Implementation update — 2026-07-27 (Windows aarch64 runtime)
 
 - Windows aarch64 now runs the same real-loopback socket contracts as Windows
