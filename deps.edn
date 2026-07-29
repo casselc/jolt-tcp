@@ -9,7 +9,7 @@
          ;; Carries the monotonic wake cursor required by the reactor, the
          ;; reviewed Winsock poller on both x86-64 and aarch64, and the
          ;; process-handle-count leak oracle used by its Windows gates.
-         :git/sha "c3747385235df812e0d739a3e9f71c4dfb07b474"}}
+         :git/sha "3b83e53f275f5087f9948b9fef445546fe773eb5"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,

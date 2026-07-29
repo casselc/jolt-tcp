@@ -8,7 +8,7 @@ permissions:
 env:
   # One reviewed fork revision for every source-mode lane. Keep this centralized
   # so a platform cannot silently validate against a different core.
-  JOLT_CORE_SHA: 8a208a82fd39425e701a00906cd5d207da12f1ec
+  JOLT_CORE_SHA: b921991e532ce2555d947bf88bc0464bf0c89d27
   CHEZ_TOOLCHAIN_RELEASE: chez-ci-10.4.1.1
 
 jobs:

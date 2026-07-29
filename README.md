@@ -214,9 +214,9 @@ JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
   /path/to/reviewed-jolt/bin/jolt -M:test
 ```
 
-The reviewed Jolt core is the upstream-v0.5.7 rebase at
-`8a208a82fd39425e701a00906cd5d207da12f1ec`; `deps.edn` pins jolt-net at
-`c3747385235df812e0d739a3e9f71c4dfb07b474`, which includes the reviewed
+The reviewed Jolt core is the upstream-v0.5.10 rebase at
+`b921991e532ce2555d947bf88bc0464bf0c89d27`; `deps.edn` pins jolt-net at
+`3b83e53f275f5087f9948b9fef445546fe773eb5`, which includes the reviewed
 Winsock readiness backend on x86_64 and aarch64, the monotonic wake-cursor
 repair, and count-based Windows handle-leak gates. Test aliases pin the public
 jolt-hegel integration at

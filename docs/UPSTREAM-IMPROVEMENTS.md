@@ -18,20 +18,21 @@ thin macro surface over host-provided primitives. Recheck every claim against
 the exact upstream SHA before removing a workaround.
 
 The reviewed Jolt proposal fork is published only to `casselc/jolt`, now
-rebased over upstream v0.5.7 on `codex/upstream-rebase-v0.5.7`; nothing has
+rebased over upstream v0.5.10 on `codex/upstream-rebase-v0.5.10`; nothing has
 been pushed to the upstream project's origin and no pull request has been
 opened. The exact current core revision is
-`8a208a82fd39425e701a00906cd5d207da12f1ec`. It retains the reviewed FFI and
+`b921991e532ce2555d947bf88bc0464bf0c89d27`. It retains the reviewed FFI and
 byte-range primitives, the portable git-dependency diagnostics, and the
-fresh-process namespace-cache gate. The per-namespace runtime AOT design
-remains excluded from the active loader because it cannot replay downstream
-top-level effects.
+fresh-process namespace-cache gate, and serializes same-process Git cache
+transactions to avoid native Windows cleanup races. The per-namespace runtime
+AOT design remains excluded from the active loader because it cannot replay
+downstream top-level effects.
 
 The current dependency pin is jolt-net
-`c3747385235df812e0d739a3e9f71c4dfb07b474`. It retains the W1-W4 Windows
+`3b83e53f275f5087f9948b9fef445546fe773eb5`. It retains the W1-W4 Windows
 socket stack and W6A.1 monotonic wake cursor, adds reviewed aarch64 descriptors,
-and replaces allocator-value leak heuristics with a count-based Windows process
-handle oracle.
+replaces allocator-value leak heuristics with a count-based Windows process
+handle oracle, and validates the substrate against the v0.5.10 proposal core.
 
 ## Implementation update — 2026-07-28 (strict timed waits)
 
