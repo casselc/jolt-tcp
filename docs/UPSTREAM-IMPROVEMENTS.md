@@ -34,6 +34,27 @@ socket stack and W6A.1 monotonic wake cursor, adds reviewed aarch64 descriptors,
 replaces allocator-value leak heuristics with a count-based Windows process
 handle oracle, and validates the substrate against the v0.5.10 proposal core.
 
+## Implementation update — 2026-07-28 (Jolt v0.5.10 checkpoint)
+
+- TCP revision `e67fd1eb331e6c9736140f2ce4cfeba9ec0d8787` repins the
+  proposal core to `b921991e532ce2555d947bf88bc0464bf0c89d27` and jolt-net
+  to `3b83e53f275f5087f9948b9fef445546fe773eb5`.
+- Hosted
+  [run 30419080435](https://github.com/casselc/jolt-tcp/actions/runs/30419080435)
+  passed all six targets. Each POSIX lane passed the complete 29-test /
+  123-assertion suite. Both Windows architectures passed the 24-test /
+  151-assertion real-loopback gate, the complete 29-test / 123-assertion suite,
+  and the 14-test / 21-assertion portable-buffer gate, with zero failures or
+  errors.
+- `src/` and `test/` are byte-identical to the preceding checkpoint. The local
+  exact-stack run also reproduced the no-park re-arm witness over 60 exchanges
+  and all 31 SMT verdicts (10 UNSAT corrected models and 21 SAT controls);
+  the corrected Prolog call graph again admitted no recursive acquisition while
+  its faulty control did.
+
+This checkpoint changes dependency identity and evidence, not TCP lifecycle
+semantics. The existing models therefore remain the relevant proofs.
+
 ## Implementation update — 2026-07-28 (strict timed waits)
 
 - A cold six-target run of the shared immutable Chez 10.4.1 toolchain passed at
