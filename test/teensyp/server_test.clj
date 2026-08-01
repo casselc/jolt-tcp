@@ -845,6 +845,72 @@
     (check "CLOSED shutdown contexts explicitly clear write readiness"
            [[#{}] #{}] [@updates @(:interests ctx)])))
 
+(defn- test-reactor-wake-cursor-ordering []
+  ;; The cursor is the consumer half of jolt.net's publication contract. Pin
+  ;; placement without timing: normal service samples before draining worker
+  ;; state, and shutdown samples before even scanning WORKING.
+  (let [events (atom [])
+        errors (atom [])
+        running? (atom true)
+        srv {:poller :poller
+             :listener :listener
+             :listener-token (atom nil)
+             :reactor-ready (promise)
+             :running? running?
+             :admission (atom {:phase :open :active 0})
+             :accept-gate (atom false)
+             :opts {:error-logger #(swap! errors conj %)}}]
+    (with-redefs-fn
+      {#'jnet/register!
+       (fn [_ _ _]
+         (swap! events conj :register)
+         {:jolt.net/generation 1})
+       #'jnet/wake-cursor
+       (fn [_]
+         (swap! events conj :cursor)
+         17)
+       #'tcp/process-pending!
+       (fn [_] (swap! events conj :producer-read))
+       #'jnet/await-ready
+       (fn [_ timeout-ms cursor]
+         (swap! events conj [:await timeout-ms cursor])
+         (reset! running? false)
+         [])
+       #'tcp/cleanup-server!
+       (fn [_] (swap! events conj :cleanup))}
+      #(@#'tcp/reactor-loop srv))
+    (check "reactor samples wake cursor before draining producer-owned state"
+           [:register :cursor :producer-read [:await 1000 17] :cleanup]
+           @events)
+    (check "cursor contract probe raises no reactor error" [] @errors))
+
+  (let [events (atom [])
+        flag-state (atom tcp/WORKING)
+        flags (reify clojure.lang.IDeref
+                (deref [_]
+                  (swap! events conj :working-read)
+                  @flag-state))
+        ctx {:flags flags}
+        srv {:poller :poller :conns (atom {1 ctx})}]
+    (with-redefs-fn
+      {#'jnet/wake-cursor
+       (fn [_]
+         (swap! events conj :cursor)
+         23)
+       #'tcp/prepare-shutdown-active!
+       (fn [_]
+         (swap! events conj :prepare)
+         (reset! flag-state 0))
+       #'jnet/await-ready
+       (fn [_ timeout-ms cursor]
+         (swap! events conj [:await timeout-ms cursor])
+         [])}
+      #(@#'tcp/quiesce-handlers! srv))
+    (check "shutdown samples wake cursor before WORKING and pending reads"
+           [:cursor :working-read :prepare [:await 1000 23]
+            :cursor :working-read]
+           @events)))
+
 (defn- test-write-completion-success-and-failure []
   (let [observed (promise)
         handler
@@ -1185,6 +1251,7 @@
   (test-accept-batches-cancellation-and-registration-rollback)
   (test-direct-executor-stop-releases-accept-gate)
   (test-closed-shutdown-context-clears-write-readiness)
+  (test-reactor-wake-cursor-ordering)
   (test-write-completion-success-and-failure)
   (test-rejected-handler-submission-does-not-leak-working)
   (test-stop-linearizes-with-reactor-admission)

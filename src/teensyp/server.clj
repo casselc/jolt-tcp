@@ -976,14 +976,20 @@
   write callback from deadlocking cleanup."
   [srv]
   (loop []
-    (when (some #(flag? % WORKING) (vals @(:conns srv)))
-      (prepare-shutdown-active! srv)
-      (doseq [{:keys [token events]} (net/await-ready (:poller srv) 1000)]
-        (when-let [ctx (get @(:conns srv)
-                            (:jolt.net/generation token))]
-          (when (= token @(:token ctx))
-            (handle-shutdown-events! srv ctx events))))
-      (recur))))
+    ;; Sample before both producer-owned reads below. A handler can clear
+    ;; WORKING, publish itself to :pending, and wake between either read and the
+    ;; wait. Carrying this cursor prevents that unobserved wake from being
+    ;; consumed as stale by await-ready.
+    (let [cursor (net/wake-cursor (:poller srv))]
+      (when (some #(flag? % WORKING) (vals @(:conns srv)))
+        (prepare-shutdown-active! srv)
+        (doseq [{:keys [token events]}
+                (net/await-ready (:poller srv) 1000 cursor)]
+          (when-let [ctx (get @(:conns srv)
+                              (:jolt.net/generation token))]
+            (when (= token @(:token ctx))
+              (handle-shutdown-events! srv ctx events))))
+        (recur)))))
 
 (defn- shutdown-and-await! [executor]
   (.shutdown executor)
@@ -1146,21 +1152,27 @@
       (deliver (:reactor-ready srv) {:ok true})
       (loop []
         (when @(:running? srv)
-          (with-running-admission srv #(process-pending! srv))
-          (when @(:running? srv)
-            (doseq [{:keys [token events]}
-                    (net/await-ready (:poller srv) 1000)]
-              (with-running-admission
-                srv
-                (fn []
-                  (if (= token @(:listener-token srv))
-                    (when (contains? events :read)
-                      (try (do-accept srv)
-                           (catch :default e (report-error srv e))))
-                    (when-let [ctx (get @(:conns srv)
-                                        (:jolt.net/generation token))]
-                      (when (= token @(:token ctx))
-                        (handle-conn-events srv ctx events))))))))
+          ;; The cursor must precede process-pending!: finish-work! publishes a
+          ;; generation and then wakes, and a publication landing after this
+          ;; turn's drain is real work the reactor has not observed. The old
+          ;; two-argument wait sampled at its own entry and could discard that
+          ;; wake, adding a full native safety tick before the next turn.
+          (let [cursor (net/wake-cursor (:poller srv))]
+            (with-running-admission srv #(process-pending! srv))
+            (when @(:running? srv)
+              (doseq [{:keys [token events]}
+                      (net/await-ready (:poller srv) 1000 cursor)]
+                (with-running-admission
+                  srv
+                  (fn []
+                    (if (= token @(:listener-token srv))
+                      (when (contains? events :read)
+                        (try (do-accept srv)
+                             (catch :default e (report-error srv e))))
+                      (when-let [ctx (get @(:conns srv)
+                                          (:jolt.net/generation token))]
+                        (when (= token @(:token ctx))
+                          (handle-conn-events srv ctx events)))))))))
           (recur))))
     (catch :default e
       (deliver (:reactor-ready srv) {:error e})

@@ -6,7 +6,7 @@
 
  :deps {io.github.casselc/jolt-net
         {:git/url "https://github.com/casselc/jolt-net.git"
-         :git/sha "7de096d0f02f0f452124a110cbbd4f5b966f4c67"}}
+         :git/sha "f2648525f08a7fbef5b82b4a11268b76f3984155"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,
