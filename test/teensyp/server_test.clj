@@ -286,15 +286,17 @@
 ;; that half-closes while the handler is mid-call used to get back MORE bytes than
 ;; it sent, and sometimes nothing at all.
 ;;
-;; Both are the same race. EOF was detected while WORKING was set, so
+;; Both are the same race. EOF was detected through a recv while WORKING was set,
+;; violating read-buffer ownership, so
 ;; (a) handle-read had not compacted the consumed prefix and handle-eof! rebuilt
 ;;     the read-view over bytes the handler had already consumed and echoed, and
 ;; (b) if WORKING was still set inside handle-eof!, the EOF notification was
 ;;     dropped entirely — nothing else delivers it, so a handler waiting for
 ;;     peer-closed? before closing hung the connection until the client gave up.
 ;;
-;; The sleep makes the race deterministic: EOF always lands while the handler is
-;; working. Without the fix this both duplicates bytes and hangs.
+;; The sleep makes readiness land while the handler is working. The safe reactor
+;; defers recv and EOF observation until ownership returns; the historical path
+;; both duplicated bytes and hung.
 (defn- slow-echo-close-on-eof-handler
   ([_sock] nil)
   ([state sock b]
@@ -342,13 +344,13 @@
 ;; protocol that releases connections needs the second one. This pins the
 ;; boundary between them:
 ;;
-;;   1. while an older handler invocation is still running, EOF may already be
-;;      observed — peer-closed? true, peer-eof-notified? false;
-;;   2. in the terminal invocation that follows, both are true and every byte
-;;      received before EOF is visible in the view that invocation was handed.
+;;   1. while an older handler invocation owns the aliased read buffer, EOF is
+;;      not probed — both predicates remain false;
+;;   2. in the terminal invocation after ownership release, both are true and
+;;      every byte received before EOF is visible in the view it was handed.
 ;;
-;; Getting (1) wrong is how a server closes a connection whose buffered requests
-;; it has not parsed yet; jolt-http had exactly that bug.
+;; Serializing (1) is what prevents a recv pointer loan from overlapping the
+;; handler's array access. The second predicate remains the release contract.
 (defn- test-eof-notification-contract []
   (let [observations (atom [])
         release      (promise)
@@ -359,12 +361,12 @@
            (let [n (buf/remaining b)
                  s (when (pos? n) (String. (buf/get-bytes! b n) "UTF-8"))]
              (when (zero? (long (:seen state)))
-               ;; Hold this invocation open past the peer's half-close, so the
-               ;; reactor observes EOF while an older view is still in hand.
+               ;; Hold this invocation open past the peer's half-close, so read
+               ;; readiness waits while an older view is still in hand.
                (deref release 3000 :timeout))
-             ;; Flags are read at the *end* of the invocation, which is the
-             ;; interesting moment: by now the peer has gone, but this
-             ;; invocation began before it did.
+             ;; Flags are read at the *end* of the invocation. The peer has gone,
+             ;; but the reactor must not borrow this invocation's backing array
+             ;; merely to observe that fact.
              (swap! observations conj {:bytes s
                                        :closed? (tcp/peer-closed? sock)
                                        :notified? (tcp/peer-eof-notified? sock)})
@@ -387,8 +389,8 @@
           term (last obs)]
       (check "EOF contract: an invocation ran before the terminal one"
              true (>= (count obs) 2))
-      (check "EOF contract: during the older invocation, EOF is observed but not notified"
-             [true false] [(:closed? busy) (:notified? busy)])
+      (check "EOF contract: the older invocation owns the buffer before EOF observation"
+             [false false] [(:closed? busy) (:notified? busy)])
       (check "EOF contract: the terminal invocation sees both"
              [true true] [(:closed? term) (:notified? term)])
       ;; Nothing received before EOF may be hidden behind the notification.
@@ -845,6 +847,74 @@
     (check "CLOSED shutdown contexts explicitly clear write readiness"
            [[#{}] #{}] [@updates @(:interests ctx)])))
 
+(defn- test-working-read-buffer-ownership-and-rearm []
+  ;; The read view and reactor buffer have independent cursors but one backing
+  ;; byte-array. WORKING therefore excludes recv, while WRITING must remain live
+  ;; so a handler can wait for its own completion callback.
+  (let [ctx {:flags (atom tcp/WORKING)}
+        reads (atom 0)]
+    (check "WORKING masks read readiness while the handler owns the buffer"
+           #{} (@#'tcp/interest ctx))
+    (swap! (:flags ctx) bit-or tcp/WRITING)
+    (check "WORKING preserves independent write readiness"
+           #{:write} (@#'tcp/interest ctx))
+    (with-redefs [jnet/try-read-bytes!
+                  (fn [& _] (swap! reads inc) 1)]
+      (@#'tcp/handle-read nil ctx))
+    (check "a stale read event cannot recv while WORKING"
+           0 @reads)
+    (swap! (:flags ctx) bit-and-not tcp/WORKING)
+    (check "clearing WORKING rearms read without dropping write"
+           #{:read :write} (@#'tcp/interest ctx)))
+
+  ;; Accepted sockets are registered before their Context is published. Hold
+  ;; the accept task in a deterministic executor, feed the reactor that initial
+  ;; stale :read event, and prove it masks without recv before finish-work rearms.
+  (let [queued (atom nil)
+        registrations (atom [])
+        updates (atom [])
+        reads (atom 0)
+        wakes (atom 0)
+        executor (reify java.util.concurrent.Executor
+                   (execute [_ task] (reset! queued task)))
+        srv (fake-accept-server executor)
+        token {:jolt.net/generation 73 :revision 0}]
+    (with-redefs
+      [jnet/register!
+       (fn [_ _ interests]
+         (swap! registrations conj interests)
+         token)
+       jnet/update-registration!
+       (fn [_ old-token interests]
+         (swap! updates conj [old-token interests])
+         (assoc old-token :revision (inc (long (:revision old-token)))))
+       jnet/native-handle (fn [_] 73)
+       jnet/local-endpoint (fn [_] (fake-endpoint 2073))
+       jnet/peer-endpoint (fn [_] (fake-endpoint 3073))
+       jnet/try-read-bytes! (fn [& _] (swap! reads inc) 1)
+       jnet/wake! (fn [_] (swap! wakes inc))]
+      (check "accepted Context is published while its handler task is retained"
+             true (@#'tcp/admit-accepted! srv :socket))
+      (let [ctx (get @(:conns srv) 73)]
+        (check "accept starts with the registration that preceded publication"
+               [[#{:read}] [] #{:read}]
+               [@registrations (mapv second @updates) @(:interests ctx)])
+        (check "retained accept task still owns WORKING"
+               true (not (zero? (bit-and (long @(:flags ctx)) tcp/WORKING))))
+        (@#'tcp/handle-conn-events srv ctx #{:read})
+        (check "the initial stale read event masks without a recv loan"
+               [0 [#{}] #{}]
+               [@reads (mapv second @updates) @(:interests ctx)])
+        ((deref queued))
+        (check "accept completion publishes one pending wake"
+               [false #{73} 1]
+               [(not (zero? (bit-and (long @(:flags ctx)) tcp/WORKING)))
+                @(:pending srv) @wakes])
+        (@#'tcp/process-pending! srv)
+        (check "pending completion rearms read after ownership release"
+               [[#{} #{:read}] #{:read} #{}]
+               [(mapv second @updates) @(:interests ctx) @(:pending srv)])))))
+
 (defn- test-reactor-wake-cursor-ordering []
   ;; The cursor is the consumer half of jolt.net's publication contract. Pin
   ;; placement without timing: normal service samples before draining worker
@@ -1251,6 +1321,7 @@
   (test-accept-batches-cancellation-and-registration-rollback)
   (test-direct-executor-stop-releases-accept-gate)
   (test-closed-shutdown-context-clears-write-readiness)
+  (test-working-read-buffer-ownership-and-rearm)
   (test-reactor-wake-cursor-ordering)
   (test-write-completion-success-and-failure)
   (test-rejected-handler-submission-does-not-leak-working)

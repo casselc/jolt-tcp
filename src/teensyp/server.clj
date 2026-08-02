@@ -39,8 +39,11 @@
 ;; afterwards, exactly once. Deliberately NOT part of READ-MASK.
 (def ^:const EOF-SEEN 0x40)
 ;; EOF joins the mask so the reactor stops asking for POLLIN — a half-closed
-;; socket reports readable forever, which would spin the loop.
-(def ^:const READ-MASK (bit-or PAUSED CLOSED FULL EOF))
+;; socket reports readable forever, which would spin the loop. WORKING also
+;; masks only read readiness: the handler-facing view shares read-buffer's byte
+;; array, so the reactor must not start a recv pointer loan until that handler
+;; releases ownership. Write readiness remains independent below.
+(def ^:const READ-MASK (bit-or WORKING PAUSED CLOSED FULL EOF))
 
 (declare handle-close submit-read-handler report-error
          reconcile-registration! reconcile-shutdown-registration!)
@@ -414,10 +417,9 @@
 
   This is the predicate a protocol wants when deciding to release a connection.
   [[peer-closed?]] answers a different and weaker question — the reactor has
-  *observed* EOF — and can become true while an older handler invocation is
-  still running against a view taken before EOF. Acting on that is how a server
-  closes a connection whose remaining buffered requests it has not yet parsed,
-  or preempts a decision the current invocation was about to make correctly.
+  *observed* EOF. Reads are serialized with handler ownership, so ordinary read
+  arities normally observe both predicates together; callers must still use this
+  stronger predicate rather than relying on that timing detail.
 
   In short: [[peer-closed?]] means \"no more bytes will arrive\";
   [[peer-eof-notified?]] means \"and you are now looking at all of them\"."
@@ -425,12 +427,15 @@
   (not (zero? (bit-and (long @(:flags socket)) (long EOF-SEEN)))))
 
 (defn peer-closed?
-  "True once the peer has closed its write side, so no further data will arrive.
+  "True once the reactor has safely drained ready input and observed that the
+  peer closed its write side, so no further data will arrive.
 
   The peer may still be reading, so this is not a signal to stop writing — it
   means the current exchange is the last one on this connection. The read arity
-  is called once when this becomes true (possibly with an empty buffer), and it
-  is the handler's job to close the socket once it has finished responding."
+  is called once when this becomes true (possibly with an empty buffer). The
+  reactor does not probe EOF while an older handler owns the aliased read buffer;
+  after that ownership is released, level readiness drives the terminal call.
+  It is the handler's job to close the socket once it has finished responding."
   [socket]
   (not (zero? (bit-and (long @(:flags socket)) (long EOF)))))
 
@@ -632,12 +637,12 @@
 
 (defn- handle-read [srv ctx]
   ;; A half-closed socket stays readable forever; once EOF is recorded there is
-  ;; nothing more to read and re-entering here would spin.
-  (when-not (flag? ctx EOF)
-    (let [working? (flag? ctx WORKING)
-          rb (:read-buffer ctx) rv (:read-view ctx)]
-      (when-not working?
-        (drop-consumed! ctx))
+  ;; nothing more to read and re-entering here would spin. WORKING repeats the
+  ;; interest-mask guard at the operation boundary: even a stale read event must
+  ;; not loan read-buffer's shared array while a handler owns its duplicate.
+  (when-not (or (flag? ctx EOF) (flag? ctx WORKING))
+    (let [rb (:read-buffer ctx)]
+      (drop-consumed! ctx)
       (when (< (buf/position rb) (long (buf/capacity rb)))
         (let [n (recv-into! ctx)]
           (cond
@@ -645,7 +650,7 @@
             (net/would-block? n) nil
             (= n 0)              nil
             :else (do (when (>= (buf/position rb) (long (buf/capacity rb))) (set-flag! ctx FULL))
-                      (when-not working? (submit-read-handler srv ctx)))))))))
+                      (submit-read-handler srv ctx))))))))
 
 (defn- handle-write [srv ctx]
   (unset-flag! ctx WRITING)
@@ -681,17 +686,15 @@
   (let [rb (:read-buffer ctx) rv (:read-view ctx)]
     (when (pos? (buf/position rv)) (unset-flag! ctx FULL))
     (cond
-      ;; Data arrived while the handler was busy.
+      ;; Defensive buffered-data handoff. The current reactor masks reads while
+      ;; WORKING, but keep this state transition correct for any future producer
+      ;; that publishes into rb before handler ownership is released.
       (> (buf/position rb) (buf/limit rv))
       (do (drop-consumed! ctx)
           (submit-read-handler srv ctx))
 
-      ;; EOF arrived while the handler was busy. The contract promises the read
-      ;; arity is called once when peer-closed? becomes true, and this is the only
-      ;; place that can still honour it: no further data will arrive, so the
-      ;; branch above never fires again and the handler would never learn the peer
-      ;; had gone. A handler waiting for peer-closed? before replying then hangs
-      ;; the connection until the client gives up.
+      ;; Defensive deferred-EOF handoff under the same rule: if EOF is published
+      ;; without its refreshed terminal view, deliver that view exactly once.
       (and (flag? ctx EOF) (not (flag? ctx EOF-SEEN)))
       (do (drop-consumed! ctx)
           (submit-read-handler srv ctx)))))
@@ -795,9 +798,8 @@
       :lock (java.util.concurrent.locks.ReentrantLock.)
       :flags (atom 0) :state (volatile! nil)
       ;; read-view starts empty (position 0, limit 0), like teensyp's
-      ;; (.. read-buffer duplicate flip). A capacity-limit here would make
-      ;; handle-pending-read's (> rb.position rv.limit) guard never fire when a
-      ;; read arrives while the accept arity is still WORKING.
+      ;; (.. read-buffer duplicate flip). The first completed recv then advances
+      ;; rb.position beyond rv.limit and makes that new data visible to a handler.
       :read-buffer rb :read-view (buf/flip (buf/duplicate rb))
       :socket-info {:local-address local
                     :remote-address remote
@@ -1132,10 +1134,10 @@
     (when-let [ctx (get @(:conns srv) generation)]
       (try
         (let [handled? (handle-pending srv ctx)]
-          ;; WORKING only serializes handler arities. It must not defer readiness
-          ;; changes: a handler is allowed to wait for its own write callback,
-          ;; which requires the reactor to enable :write while that handler is
-          ;; still running.
+          ;; WORKING masks read readiness while the handler owns read-buffer's
+          ;; shared array, but it must not defer write readiness: a handler is
+          ;; allowed to wait for its own write callback, which requires the
+          ;; reactor to enable :write while that handler is still running.
           (reconcile-registration! srv ctx)
           (when-not handled?
             (swap! (:pending srv) conj generation)))
