@@ -1,15 +1,23 @@
 (ns teensyp.windows-arm64-preview
-  "Native ARM64 source-mode preview for descriptor-independent TCP code."
+  "Native ARM64 source-mode preview for TCP namespace and poller support."
   (:require [clojure.test :as t]
+            [jolt.net :as net]
             [jolt.net.target :as target]
-            [teensyp.buffer-property-test]))
+            [teensyp.buffer-property-test]
+            [teensyp.client]
+            [teensyp.server]))
 
 (defn -main [& _]
   (let [observed (jolt.host/target)
-        descriptor-error (try
-                           (target/descriptor observed)
-                           nil
-                           (catch :default cause cause))
+        descriptor (target/descriptor observed)
+        _ (let [poller (net/open-poller)]
+            (try
+              (when-not (= [] (net/await-ready poller 0))
+                (throw
+                  (ex-info "empty Windows ARM64 poll returned unexpected events"
+                           {})))
+              (finally
+                (net/close! poller))))
         result (t/run-tests 'teensyp.buffer-property-test)
         failed (+ (:fail result 0) (:error result 0))]
     (when-not (= [:windows :aarch64 64]
@@ -17,11 +25,15 @@
       (throw
         (ex-info "portable TCP preview did not run on native Windows ARM64"
                  {:target observed})))
-    (when-not (= :unsupported-target
-                 (:jolt.net/kind (ex-data descriptor-error)))
+    (when-not (and (target/supported-target? observed)
+                   (= :windows (:platform descriptor))
+                   (= :probed (:evidence descriptor))
+                   (= descriptor (net/target-descriptor)))
       (throw
-        (ex-info "jolt.net did not fail closed before its ARM64 descriptor"
-                 {:target observed :error descriptor-error})))
+        (ex-info "jolt.net did not select its probed Windows ARM64 descriptor"
+                 {:target observed
+                  :descriptor descriptor
+                  :public-descriptor (net/target-descriptor)})))
     (when-not (pos? (:test result 0))
       (throw
         (ex-info "portable buffer property selection was vacuous"
