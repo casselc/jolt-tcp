@@ -7,17 +7,34 @@
             [teensyp.client]
             [teensyp.server]))
 
+(defn- check-public-poller! []
+  (let [poller (net/open-poller)]
+    (try
+      (when-not (= [] (net/await-ready poller 0))
+        (throw
+          (ex-info "empty Windows ARM64 poll returned unexpected events"
+                   {})))
+      (let [cursor (net/wake-cursor poller)
+            _ (net/wake! poller)
+            waiter (future (net/await-ready poller 120000 cursor))
+            ready (deref waiter 15000 ::wake-timeout)]
+        (when (= ::wake-timeout ready)
+          (throw
+            (ex-info "Windows ARM64 wake-cursor wait parked after publication"
+                     {:cursor cursor
+                      :watchdog-ms 15000})))
+        (when-not (= [] ready)
+          (throw
+            (ex-info "Windows ARM64 wake-cursor wait returned unexpected events"
+                     {:cursor cursor
+                      :ready ready}))))
+      (finally
+        (net/close! poller)))))
+
 (defn -main [& _]
   (let [observed (jolt.host/target)
         descriptor (target/descriptor observed)
-        _ (let [poller (net/open-poller)]
-            (try
-              (when-not (= [] (net/await-ready poller 0))
-                (throw
-                  (ex-info "empty Windows ARM64 poll returned unexpected events"
-                           {})))
-              (finally
-                (net/close! poller))))
+        _ (check-public-poller!)
         result (t/run-tests 'teensyp.buffer-property-test)
         failed (+ (:fail result 0) (:error result 0))]
     (when-not (= [:windows :aarch64 64]

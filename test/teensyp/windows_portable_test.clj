@@ -15,6 +15,26 @@
        (filter #(contains? (meta %) :test))
        (sort-by #(str (:name (meta %))))))
 
+(defn- check-public-poller-wake! []
+  (let [poller (net/open-poller)]
+    (try
+      (let [cursor (net/wake-cursor poller)
+            _ (net/wake! poller)
+            waiter (future (net/await-ready poller 120000 cursor))
+            ready (deref waiter 15000 ::wake-timeout)]
+        (when (= ::wake-timeout ready)
+          (throw
+            (ex-info "Windows wake-cursor wait parked after publication"
+                     {:cursor cursor
+                      :watchdog-ms 15000})))
+        (when-not (= [] ready)
+          (throw
+            (ex-info "Windows wake-cursor wait returned unexpected events"
+                     {:cursor cursor
+                      :ready ready}))))
+      (finally
+        (net/close! poller)))))
+
 (defn -main [& _]
   (let [client-vars (test-vars-in 'teensyp.client-test)
         loopback-vars
@@ -29,6 +49,7 @@
     (let [poller (net/open-poller)]
       (when-not (true? (net/close! poller))
         (throw (ex-info "Windows poller did not close exactly once" {})))
+      (check-public-poller-wake!)
       (t/test-vars client-vars)
       (let [failed (+ (t/n-fail) (t/n-error))]
         (when-not (= :windows (:os (jolt.host/target)))

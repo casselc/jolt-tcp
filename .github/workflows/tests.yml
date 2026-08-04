@@ -145,6 +145,7 @@ jobs:
       run:
         shell: msys2 {0}
     env:
+      GITLIBS: ${{ github.workspace }}/.gitlibs
       JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/aot-cache
     steps:
       - uses: actions/checkout@v4
@@ -205,6 +206,25 @@ jobs:
           submodules: recursive
           path: jolt
 
+      # Jolt v0.5.20 reuses existing tools.gitlibs checkouts read-only. Keep
+      # Windows source mode out of its POSIX-only fresh-fetch path, while still
+      # resolving the exact committed dependency coordinates and manifests.
+      - name: Materialize pinned jolt-net dependency
+        uses: actions/checkout@v4
+        with:
+          repository: casselc/jolt-net
+          ref: 699b908ffb4eb79ad35055cdc20866bb504e6932
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.casselc/jolt-net/699b908ffb4eb79ad35055cdc20866bb504e6932
+
+      - name: Materialize pinned jolt-hegel dependency
+        uses: actions/checkout@v4
+        with:
+          repository: chucklehead-dev/jolt-hegel
+          ref: ffe523023437862c7e474dc216346426318754c6
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.chucklehead-dev/jolt-hegel/ffe523023437862c7e474dc216346426318754c6
+
       - name: Run dependency-free TCP client and loopback contracts
         shell: powershell
         env:
@@ -243,6 +263,7 @@ jobs:
     timeout-minutes: 40
     continue-on-error: true
     env:
+      GITLIBS: ${{ github.workspace }}/.gitlibs
       JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
     steps:
       - name: Checkout jolt-tcp
@@ -270,6 +291,22 @@ jobs:
           ref: 9fc64f93eba8b56a319f91bb1a322e2efced9c70
           submodules: recursive
           path: jolt
+
+      - name: Materialize pinned jolt-net dependency
+        uses: actions/checkout@v4
+        with:
+          repository: casselc/jolt-net
+          ref: 699b908ffb4eb79ad35055cdc20866bb504e6932
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.casselc/jolt-net/699b908ffb4eb79ad35055cdc20866bb504e6932
+
+      - name: Materialize pinned jolt-hegel dependency
+        uses: actions/checkout@v4
+        with:
+          repository: chucklehead-dev/jolt-hegel
+          ref: ffe523023437862c7e474dc216346426318754c6
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.chucklehead-dev/jolt-hegel/ffe523023437862c7e474dc216346426318754c6
 
       - name: Assert native Chez for source-mode Jolt
         shell: pwsh
