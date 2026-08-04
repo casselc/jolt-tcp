@@ -42,6 +42,22 @@
             :teensyp.client/op op
             :teensyp.client/kind :closed}))
 
+(defn- translate-closed-native!
+  "Run one client-owned native I/O step (try-read/try-write or a readiness wait
+  on a persistent poller). A native/jolt.net error observed after the lifecycle
+  has left :open is the terminal close winning the concurrent error race, so
+  rethrow it as the canonical client cancellation; an error observed while the
+  lifecycle is still :open is preserved identically (native reset, EOF
+  signalling, etc.). Covers the window between a readiness wake and the next
+  non-blocking probe, where close! can retire the socket out from under us."
+  [lifecycle op thunk]
+  (try
+    (thunk)
+    (catch :default e
+      (if (= :open (:phase @lifecycle))
+        (throw e)
+        (throw (closed-ex op))))))
+
 (defn- write-shutdown-ex []
   (ex-info "teensyp.client send: the write side is shut down"
            {:err ::write-shutdown
@@ -549,15 +565,18 @@
                           (ensure-open! lifecycle :send)
                           (when (:write-shutdown? @lifecycle)
                             (throw (write-shutdown-ex)))
-                          (send-all-loop!
-                            #(net/try-write-bytes! socket %1 %2 %3)
-                            #(await-operation!
-                               deadline monotonic-now
-                               (fn [timeout-ms]
-                                 (net/await-ready write-poller timeout-ms)))
-                            #(deadline-expired? deadline monotonic-now)
-                            #(send-timeout! deadline)
-                            src off len)))]
+                          (translate-closed-native!
+                            lifecycle :send
+                            (fn []
+                              (send-all-loop!
+                                #(net/try-write-bytes! socket %1 %2 %3)
+                                #(await-operation!
+                                   deadline monotonic-now
+                                   (fn [timeout-ms]
+                                     (net/await-ready write-poller timeout-ms)))
+                                #(deadline-expired? deadline monotonic-now)
+                                #(send-timeout! deadline)
+                                src off len)))))]
                   (if (= gate-timeout result)
                     (send-timeout! deadline)
                     result))))
@@ -579,16 +598,19 @@
                             (:read-eof? @lifecycle) nil
                             :else
                             (let [read-result
-                                  (receive-loop!
-                                    #(net/try-read-bytes! socket %1 %2 %3)
-                                    #(await-operation!
-                                       deadline monotonic-now
-                                       (fn [timeout-ms]
-                                         (net/await-ready @read-poller
-                                                          timeout-ms)))
-                                    #(deadline-expired? deadline monotonic-now)
-                                    #(receive-timeout! deadline)
-                                    dest off len)]
+                                  (translate-closed-native!
+                                    lifecycle :receive
+                                    (fn []
+                                      (receive-loop!
+                                        #(net/try-read-bytes! socket %1 %2 %3)
+                                        #(await-operation!
+                                           deadline monotonic-now
+                                           (fn [timeout-ms]
+                                             (net/await-ready @read-poller
+                                                              timeout-ms)))
+                                        #(deadline-expired? deadline monotonic-now)
+                                        #(receive-timeout! deadline)
+                                        dest off len)))]
                               (when (nil? read-result)
                                 (swap! lifecycle
                                        #(if (= :open (:phase %))

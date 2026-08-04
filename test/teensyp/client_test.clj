@@ -582,6 +582,59 @@
           (is (identical? endpoint-error thrown))
           (is (= [:read-poller :write-poller :socket] @closed)))))))
 
+(deftest translate-closed-native-helper
+  (let [poller-closed-ex
+        (ex-info "jolt.net await-ready: poller is closed"
+                 {:jolt.net/op :await-ready
+                  :jolt.net/kind :invalid
+                  :jolt.net/platform :posix
+                  :jolt.net/message "poller is closed"})]
+    (testing "a native error during receive after close begins is canonicalized"
+      (let [lifecycle (atom {:phase :closing})
+            thrown
+            (thrown-by
+              #(@#'client/translate-closed-native!
+                 lifecycle :receive
+                 (fn [] (throw poller-closed-ex))))]
+        (is (= ::client/closed (:err (ex-data thrown))))
+        (is (= :receive (:teensyp.client/op (ex-data thrown))))
+        (is (= :closed (:teensyp.client/kind (ex-data thrown))))
+        (is (= "teensyp.client receive: connection is closed"
+               (ex-message thrown)))
+        ;; No jolt.net data leaks through the public client boundary.
+        (is (not (contains? (ex-data thrown) :jolt.net/op)))
+        (is (= :closing (:phase @lifecycle)))))
+    (testing "a native error during send after close completes is canonicalized"
+      (let [lifecycle (atom {:phase :closed})
+            thrown
+            (thrown-by
+              #(@#'client/translate-closed-native!
+                 lifecycle :send
+                 (fn [] (throw poller-closed-ex))))]
+        (is (= ::client/closed (:err (ex-data thrown))))
+        (is (= :send (:teensyp.client/op (ex-data thrown))))
+        (is (= :closed (:teensyp.client/kind (ex-data thrown))))
+        (is (= "teensyp.client send: connection is closed"
+               (ex-message thrown)))))
+    (testing "a native reset observed while lifecycle is still open is preserved"
+      ;; The contract: only the terminal-close race is translated. A real native
+      ;; error on a live connection must surface identically, with its cause and
+      ;; jolt.net data intact, so callers can distinguish reset/EOF/etc.
+      (let [lifecycle (atom {:phase :open})
+            reset-ex
+            (ex-info "connection reset"
+                     {:jolt.net/op :read
+                      :jolt.net/kind :connection-reset
+                      :jolt.net/code 104})
+            thrown
+            (thrown-by
+              #(@#'client/translate-closed-native!
+                 lifecycle :receive
+                 (fn [] (throw reset-ex))))]
+        (is (identical? reset-ex thrown))
+        (is (= :connection-reset
+               (:jolt.net/kind (ex-data thrown))))))))
+
 (defn- loopback-handler
   ([_socket] nil)
   ([state socket buffer]
@@ -670,3 +723,78 @@
         (is (client/closed? connection))
         (is (= :closed (:state (client/connection-info connection))))
         (tcp/stop-server server)))))
+
+(deftest blocked-native-waits-translate-concurrent-close
+  ;; Causally enter each client-owned await boundary before closing. This
+  ;; proves the send and receive wiring, not only the helper in isolation.
+  (doseq [[op expected-poller]
+          [[:receive :read-poller]
+           [:send :write-poller]]]
+    (testing (str (name op) " translates a close that wakes await-ready")
+      (let [await-entered (promise)
+            poller-closed {:read-poller (promise)
+                           :write-poller (promise)}
+            closed (atom [])
+            poller-error
+            (ex-info "jolt.net await-ready: poller is closed"
+                     {:jolt.net/op :await-ready
+                      :jolt.net/kind :invalid})]
+        (with-redefs
+          [net/open-poller (fn [] :read-poller)
+           net/register! (fn [_poller _socket _events] :read-token)
+           net/local-endpoint
+           (fn [_]
+             {:jolt.net/host "127.0.0.1"
+              :jolt.net/port 1000
+              :jolt.net/family :ipv4})
+           net/peer-endpoint
+           (fn [_]
+             {:jolt.net/host "127.0.0.1"
+              :jolt.net/port 2000
+              :jolt.net/family :ipv4})
+           net/try-read-bytes!
+           (fn [_socket _dest _off _len] net/would-block)
+           net/try-write-bytes!
+           (fn [_socket _src _off _len] net/would-block)
+           net/await-ready
+           (fn [poller _timeout-ms]
+             (deliver await-entered poller)
+             (when (= ::close-timeout
+                      (deref (get poller-closed poller)
+                             2000 ::close-timeout))
+               (throw (ex-info "test close did not reach poller"
+                               {:poller poller})))
+             (throw poller-error))
+           net/close!
+           (fn [owned]
+             (swap! closed conj owned)
+             (when-let [closed-signal (get poller-closed owned)]
+               (deliver closed-signal true))
+             true)]
+          (let [connection
+                (@#'client/build-connection!
+                  {:socket :socket :write-poller :write-poller})]
+            (try
+              (let [operation
+                    (future
+                      (try
+                        (case op
+                          :receive
+                          (client/receive-at-most! connection 1)
+
+                          :send
+                          (client/send-all! connection (byte-array 1)))
+                        (catch :default e e)))
+                    entered (deref await-entered 2000 ::await-timeout)]
+                (is (= expected-poller entered))
+                (is (true? (client/close! connection)))
+                (let [outcome (deref operation 2000 ::operation-timeout)]
+                  (is (not= ::operation-timeout outcome))
+                  (is (= ::client/closed (:err (ex-data outcome))))
+                  (is (= op (:teensyp.client/op (ex-data outcome))))
+                  (is (= :closed (:teensyp.client/kind (ex-data outcome))))
+                  (is (not (contains? (ex-data outcome) :jolt.net/op)))
+                  (is (= [:read-poller :write-poller :socket] @closed))))
+              (finally
+                ;; Idempotent cleanup remains inside the redefined native seam.
+                (client/close! connection)))))))))
