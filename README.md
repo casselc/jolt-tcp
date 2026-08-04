@@ -46,7 +46,7 @@ A production blocking outbound client over `jolt.net`:
   order. `:connect-timeout-ms` defaults to 30000; explicitly passing
   `:connect-timeout-ms nil` selects an unbounded connect. Callers that already
   compose deadlines may pass one absolute `:deadline-nanos` in
-  `jolt.host/monotonic-nanos` units. The one deadline covers resolution and
+  `jolt.host/mono-nanos` units. The one deadline covers resolution and
   every candidate rather than restarting for each address. The current
   `jolt.net` resolver is synchronous: an over-deadline result is rejected, but
   an in-flight `getaddrinfo` cannot yet be preempted.
@@ -170,10 +170,10 @@ delegate to the production `teensyp.client` surface.
   `{:host string :port integer :family keyword}` in `:local-address` and
   `:remote-address`, plus `:fd` for diagnostics only. The public TCP boundary
   does not expose `jolt.net`-namespaced data keys.
-- **Platform**: follows the readiness targets implemented by `jolt.net`;
-  currently Linux x86_64, Linux aarch64, macOS arm64, and macOS x86_64.
-  Windows readiness is a follow-up. Windows x86_64 and aarch64 source-mode
-  portable gates do not change that runtime boundary.
+- **Platform**: follows the readiness targets implemented by the pinned
+  `jolt.net`: Linux x86_64, Linux aarch64, macOS arm64, macOS x86_64, Windows
+  x86_64, and Windows aarch64. That is the underlying transport capability;
+  this repository's narrower per-platform Jolt-TCP evidence is listed below.
 
 ### CI platform coverage
 
@@ -186,20 +186,18 @@ delegate to the production `teensyp.client` surface.
   Because libhegel 0.30.1 publishes no Darwin/x86_64 asset, the Intel job builds
   its exact tagged source and supplies the resulting library explicitly.
 - Windows x86_64 has candidate native layered gates. The first source-builds
-  Chez, loads the production TCP namespaces, runs the platform-independent
-  outbound-client models with no optional test dependency, and requires
-  `jolt.net/open-poller` to fail with `:unsupported-target`. The second installs
-  libhegel and runs the descriptor-independent buffer properties. The pinned
-  `jolt.net` includes reviewed W1/W2 blocking and non-blocking byte-I/O
-  substrate, but neither gate is **socket-runtime support**: no TCP
-  server/client loopback test is enabled until Windows readiness exists.
+  Chez, loads the production TCP namespaces, opens and closes the public
+  WSAPoll-backed poller, and runs every outbound-client model including a real
+  server/client loopback with no optional test dependency. The second installs
+  libhegel and runs the buffer properties. This is client/socket-runtime
+  evidence, not yet the complete server acceptance and stress suite.
 - Windows aarch64 has a non-gating public-preview source-mode lane on
   `windows-11-vs2026-arm`. It builds native `tarm64nt` Chez 10.4.1 and runs the
-  descriptor-independent `teensyp.buffer` property suite through the upstream
-  Windows ARM64 libhegel asset. Because jolt-net's newly probed ARM64 facts have
-  not yet been reviewed into a descriptor, this lane requires target selection
-  to fail closed and does not load the client/server namespaces. It uses no
-  packaged joltc, devboot, or AOT cache.
+  `teensyp.buffer` property suite through the upstream Windows ARM64 libhegel
+  asset. It also requires the probed ARM64 descriptor, loads the production
+  client/server namespaces, and opens and closes the public poller. It does not
+  yet run the full TCP loopback or server acceptance suite and uses no packaged
+  joltc, devboot, or AOT cache.
 
 ## Testing
 
@@ -211,9 +209,9 @@ JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
 ```
 
 The reviewed Jolt core is commit
-`85f645aa1178e4b631198dcbaf46bdad1283750b`; `deps.edn` pins the reviewed
-combined jolt-net W1/W2 revision
-`7de096d0f02f0f452124a110cbbd4f5b966f4c67`. The required-mode environment
+`9fc64f93eba8b56a319f91bb1a322e2efced9c70`; `deps.edn` pins the reviewed
+cross-platform jolt-net aggregate at
+`699b908ffb4eb79ad35055cdc20866bb504e6932`. The required-mode environment
 variable prevents a missing or unloadable libhegel from silently skipping the
 property layers.
 

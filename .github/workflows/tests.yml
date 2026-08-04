@@ -93,7 +93,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: casselc/jolt
-          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          ref: 9fc64f93eba8b56a319f91bb1a322e2efced9c70
           submodules: recursive
           path: jolt
 
@@ -133,20 +133,19 @@ jobs:
         run: |
           JOLT_PWD="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/jolt/bin/joltc" -M:test
 
-# The pinned jolt.net has reviewed Windows W1/W2 blocking and non-blocking byte
-# I/O, but no readiness backend. Keep native layers anyway: source-build Chez,
-# first exercise dependency-free TCP models and production namespace loading,
-# then install libhegel and run descriptor-independent buffer properties.
-# Requiring open-poller to fail closed keeps these claims distinct from real
-# client/server loopback coverage.
+# The pinned jolt.net has reviewed Windows x86-64 WSAPoll readiness. Source-build
+# Chez, exercise dependency-free client models plus a real server/client loopback,
+# then install libhegel and run the independent buffer properties. This is a
+# production client/runtime gate, not the complete POSIX server acceptance suite.
   windows-portable:
-    name: portable TCP gate (Windows x86_64; no socket runtime)
+    name: native TCP client gate (Windows x86_64)
     runs-on: windows-2022
     timeout-minutes: 30
     defaults:
       run:
         shell: msys2 {0}
     env:
+      GITLIBS: ${{ github.workspace }}/.gitlibs
       JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/aot-cache
     steps:
       - uses: actions/checkout@v4
@@ -203,11 +202,30 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: casselc/jolt
-          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          ref: 9fc64f93eba8b56a319f91bb1a322e2efced9c70
           submodules: recursive
           path: jolt
 
-      - name: Run dependency-free portable TCP contracts
+      # Jolt v0.5.20 reuses existing tools.gitlibs checkouts read-only. Keep
+      # Windows source mode out of its POSIX-only fresh-fetch path, while still
+      # resolving the exact committed dependency coordinates and manifests.
+      - name: Materialize pinned jolt-net dependency
+        uses: actions/checkout@v4
+        with:
+          repository: casselc/jolt-net
+          ref: 699b908ffb4eb79ad35055cdc20866bb504e6932
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.casselc/jolt-net/699b908ffb4eb79ad35055cdc20866bb504e6932
+
+      - name: Materialize pinned jolt-hegel dependency
+        uses: actions/checkout@v4
+        with:
+          repository: chucklehead-dev/jolt-hegel
+          ref: ffe523023437862c7e474dc216346426318754c6
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.chucklehead-dev/jolt-hegel/ffe523023437862c7e474dc216346426318754c6
+
+      - name: Run dependency-free TCP client and loopback contracts
         shell: powershell
         env:
           JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
@@ -233,18 +251,19 @@ jobs:
             -InstallHegel `
             -TimeoutSeconds 180
 
-# Windows ARM64 has no reviewed jolt.net descriptor yet, so loading
-# teensyp.client/server would correctly fail before any socket call. This
-# public-preview lane still proves that native source-mode Jolt and libhegel can
-# exercise the descriptor-independent production buffer layer. It then checks
-# the dependency's unsupported target boundary explicitly. No packaged joltc,
-# devboot, AOT cache, emulated x64 Chez, or socket-runtime claim is involved.
+# Windows ARM64 now has an independently probed jolt.net descriptor and WSAPoll
+# runtime. This public-preview lane proves native source-mode target selection,
+# production TCP namespace loading, public poller open/close, and the buffer
+# properties. It remains non-gating and does not claim the full TCP loopback or
+# server acceptance suite. No packaged joltc, devboot, AOT cache, or emulated
+# x64 Chez is involved.
   windows-arm64-source-preview:
-    name: source-mode buffer preview (Windows aarch64; non-AOT, no sockets)
+    name: source-mode TCP/poller preview (Windows aarch64; non-AOT)
     runs-on: windows-11-vs2026-arm
     timeout-minutes: 40
     continue-on-error: true
     env:
+      GITLIBS: ${{ github.workspace }}/.gitlibs
       JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt/native-cache
     steps:
       - name: Checkout jolt-tcp
@@ -269,9 +288,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: casselc/jolt
-          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          ref: 9fc64f93eba8b56a319f91bb1a322e2efced9c70
           submodules: recursive
           path: jolt
+
+      - name: Materialize pinned jolt-net dependency
+        uses: actions/checkout@v4
+        with:
+          repository: casselc/jolt-net
+          ref: 699b908ffb4eb79ad35055cdc20866bb504e6932
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.casselc/jolt-net/699b908ffb4eb79ad35055cdc20866bb504e6932
+
+      - name: Materialize pinned jolt-hegel dependency
+        uses: actions/checkout@v4
+        with:
+          repository: chucklehead-dev/jolt-hegel
+          ref: ffe523023437862c7e474dc216346426318754c6
+          persist-credentials: false
+          path: .gitlibs/libs/io.github.chucklehead-dev/jolt-hegel/ffe523023437862c7e474dc216346426318754c6
 
       - name: Assert native Chez for source-mode Jolt
         shell: pwsh
@@ -288,7 +323,7 @@ jobs:
             throw "expected Chez Scheme 10.4.1, got: $version"
           }
 
-      - name: Resolve Git dependencies and run portable buffer properties
+      - name: Run TCP/poller smoke and portable buffer properties
         shell: pwsh
         env:
           JOLT_HEGEL_REQUIRED: "1"
