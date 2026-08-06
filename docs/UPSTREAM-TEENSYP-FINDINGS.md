@@ -18,32 +18,42 @@ here is about Chez, FFI, or AOT.
 | Compared against | `jolt-tcp` @ `0c3e085`, this branch |
 | Method | Source review of all 754 lines of `src/clj/teensyp/`, driven by the defects the jolt-tcp port hit in its own equivalent code paths |
 
-**Everything below is derived from reading upstream source, not from executing
-it.** The jolt port is a reimplementation on a different transport, so a
-runtime witness there is evidence that a *class* of bug exists in the shared
-design, not that the JVM code fails identically. Findings that predict a
-concrete upstream failure carry a reproduction sketch; those should be run
-against the JVM before being filed as bugs. Line references are
-`file:line` against the SHA above.
+**Findings 3 and 7 have been reproduced on the JVM** — see the *Confirmed*
+column below. The rest are derived from reading upstream source. For those, the
+jolt port is a reimplementation on a different transport, so a runtime witness
+there is evidence that a *class* of bug exists in the shared design, not that
+the JVM code fails identically; each carries a reproduction sketch that should
+be run before filing. Line references are `file:line` against the SHA above.
+
+The confirmed pair was checked by building upstream at the SHA above (JDK 21,
+Clojure 1.12.5) and differential-testing `teensyp.buffer` against an
+independently written reference implementation over every string on the
+alphabet `{CR, LF, x}` up to length 5, at every buffer position, for four
+needles — 364 strings, ~7300 comparisons:
+
+| | `index-of-array` mismatches | `read-line` mismatches | exceptions thrown |
+| --- | ---: | ---: | ---: |
+| upstream `879da351` | 2213 | 263 | 2135 |
+| with the fix in finding 7 and 3 | 0 | 0 | 0 |
 
 Severity is about impact on a server that reaches production, not about how
 hard the bug is to reach.
 
 ## Summary
 
-| # | Severity | Area | Finding |
-| --- | --- | --- | --- |
-| [1](#1) | High | reactor | An unhandled exception on the accept or pending path terminates the whole server, silently |
-| [2](#2) | High | write API | Write callbacks are success-only, so a blocking producer parks forever when a write fails |
-| [3](#3) | High | buffer | `read-line` reads the byte *before* the buffer position; a leading bare LF throws |
-| [4](#4) | Medium-High | lifecycle | A caller-supplied executor is always shut down, shutdown cannot be awaited, and queued writes are dropped |
-| [5](#5) | Medium-High | protocol | Read EOF closes the connection immediately, so half-close request/response cannot work |
-| [6](#6) | Medium-High | stream | `stream-handler` shares one close-state atom across every connection |
-| [7](#7) | Medium | buffer | `index-of-array` reads past the limit instead of returning -1 |
-| [8](#8) | Medium | executor | Handler calls and write callbacks share one pool, which deadlocks a blocking sink at `pool-size` |
-| [9](#9) | Medium | options | `:reuse-address?` and `:recv-buffer-size` are applied after `bind`, so both are no-ops |
-| [10](#10) | Low-Medium | queues | Queue admission is check-then-act, so a concurrent producer gets `IllegalStateException` |
-| [11](#11) | Low | misc | Callback thread is inconsistent; `run-writer`-style continuations recurse; close arity drops its exception |
+| # | Severity | Confirmed | Area | Finding |
+| --- | --- | --- | --- | --- |
+| [1](#1) | High | reasoned | reactor | An unhandled exception on the accept or pending path terminates the whole server, silently |
+| [2](#2) | High | reasoned | write API | Write callbacks are success-only, so a blocking producer parks forever when a write fails |
+| [3](#3) | High | **executed** | buffer | `read-line` reads the byte *before* the buffer position; a leading bare LF throws |
+| [4](#4) | Medium-High | reasoned | lifecycle | A caller-supplied executor is always shut down, shutdown cannot be awaited, and queued writes are dropped |
+| [5](#5) | Medium-High | reasoned | protocol | Read EOF closes the connection immediately, so half-close request/response cannot work |
+| [6](#6) | Medium-High | reasoned | stream | `stream-handler` shares one close-state atom across every connection |
+| [7](#7) | Medium-High | **executed** | buffer | `index-of-array` never finds a needle in the final bytes, and throws on a short buffer |
+| [8](#8) | Medium | reasoned | executor | Handler calls and write callbacks share one pool, which deadlocks a blocking sink at `pool-size` |
+| [9](#9) | Medium | reasoned | options | `:reuse-address?` and `:recv-buffer-size` are applied after `bind`, so both are no-ops |
+| [10](#10) | Low-Medium | reasoned | queues | Queue admission is check-then-act, so a concurrent producer gets `IllegalStateException` |
+| [11](#11) | Low | reasoned | misc | Callback thread is inconsistent; `run-writer`-style continuations recurse; close arity drops its exception |
 
 ---
 
@@ -151,8 +161,9 @@ rather than hidden.
 <a id="3"></a>
 ## 3. `buffer/read-line` reads before the buffer position
 
-**Severity: high (remotely triggerable connection kill).** This one reaches
-Capra directly.
+**Severity: high (remotely triggerable connection kill). Confirmed on the
+JVM.** This one reaches Capra directly — I reproduced it end-to-end against a
+live Capra server, where it drops the connection with no response at all.
 
 ```clojure
 ;; buffer.clj:59-72
@@ -312,49 +323,70 @@ only if it closes both streams itself.
 (`src/teensyp/stream.clj:80`).
 
 <a id="7"></a>
-## 7. `index-of-array` reads past the limit instead of returning -1
+## 7. `index-of-array` never finds a needle in the final bytes
 
-**Severity: medium (public API; not on Capra's path).**
+**Severity: medium-high (public API). Confirmed on the JVM.** I originally
+recorded this as an out-of-bounds throw; testing showed a second and worse
+defect underneath it.
 
 ```clojure
 ;; buffer.clj:43-57
 (let [b   (aget needle 0)
-      end (- (.limit buffer) (alength needle) 1)]
+      end (- (.limit buffer) (alength needle) 1)]   ; <-- one short
   (loop [i (.position buffer)]
-    (if (and (= b (.get buffer i))               ; <-- unguarded probe
+    (if (and (= b (.get buffer i))                  ; <-- unguarded probe
              (matches-tail-bytes? buffer i needle))
       i
       (if (< i end) (recur (inc i)) -1))))
 ```
 
-The bounds check happens *after* the probe. When the buffer holds fewer bytes
-than the needle, `end` goes below `position` but the loop body still runs once:
-`matches-tail-bytes?` (`buffer.clj:36-41`) reads `i+1 … i+m-1`, past the limit,
-and `ByteBuffer.get(int)` throws `IndexOutOfBoundsException`. On an **empty**
-buffer — `position == limit`, the normal state while waiting for more data —
-the very first `(.get buffer i)` throws.
-
-For a caller doing incremental framing this is the common case, not an edge
-case: "I have 3 bytes, is the 5-byte delimiter here yet?" should answer -1, and
-instead throws. The natural workaround is to guard every call with a
-`remaining` check, which is what the function is supposed to do.
-
-**Fix.** Compute `end` as the last legal *start* index, `(- (.limit buffer)
-(alength needle))`, and test `i > end` before reading:
+**a. The bound is one index short — a false negative.** For a needle of `m`
+bytes the last legal start index is `limit - m`. `end` is `limit - m - 1`, and
+because the continuation test `(< i end)` sits in the *else* branch, the last
+index ever tested is `end` itself. The legal final position is never probed, so
+a needle occupying the last `m` bytes is reported absent:
 
 ```clojure
-(loop [i (.position buffer)]
-  (if (> i end)
-    -1
-    (if (and (= b (.get buffer i)) (matches-tail-bytes? buffer i needle))
-      i
-      (recur (inc i)))))
+(buf/index-of-array (ByteBuffer/wrap (.getBytes "xxx\r\n")) (.getBytes "\r\n"))
+;;=> -1     ; confirmed on upstream 879da351; should be 3
 ```
 
-An empty or too-short region then makes `end < position` and the loop returns
--1 without touching the array.
+This is the serious half. For an incremental framing parser — the function's
+entire purpose — a false negative on a delimiter that has already arrived means
+the caller waits for bytes the peer already sent. That is a hang, not an
+exception, and it resolves only if more data happens to arrive and shift the
+delimiter out of the tail.
 
-*jolt-tcp:* fixed exactly that way, with the reasoning in a comment
+**b. The probe is unguarded — a throw.** `(.get buffer i)` and
+`matches-tail-bytes?` (`buffer.clj:36-41`) run before any bounds check. When
+the buffer holds fewer bytes than the needle, `matches-tail-bytes?` reads
+`i+1 … i+m-1` past the limit and `ByteBuffer.get(int)` throws
+`IndexOutOfBoundsException`. On an **empty** buffer — `position == limit`, the
+normal state while waiting for more data — the very first probe throws.
+
+Both were confirmed by differential testing against an independent reference
+implementation: 2213 wrong answers and 2135 exceptions over ~7300 cases.
+
+**Fix.** Compute `end` as the last legal *start* index and bound the loop by it
+before reading:
+
+```clojure
+(let [b   (aget needle 0)
+      end (- (.limit buffer) (alength needle))]
+  (loop [i (.position buffer)]
+    (if (<= i end)
+      (if (and (= b (.get buffer i)) (matches-tail-bytes? buffer i needle))
+        i
+        (recur (inc i)))
+      -1)))
+```
+
+An empty or too-short region makes `end < position`, so the loop returns -1
+without touching the array. This also matches the shape of `index-of` directly
+above it, which already tests its bound first. With this applied, the same
+differential sweep reports zero mismatches and zero exceptions.
+
+*jolt-tcp:* fixed the same way, with the reasoning in a comment
 (`src/teensyp/buffer.clj:120-139`) and a property asserting agreement with a
 naive implementation over generated buffers and needles.
 
