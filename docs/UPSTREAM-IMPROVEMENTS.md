@@ -4,6 +4,10 @@ This document records changes to Jolt, `jolt.ffi`, and the Jolt runtime that
 would make jolt-tcp safer, smaller, or faster. It is a local planning document,
 not an upstream issue tracker.
 
+For findings about **teensyp itself** — defects and gaps in
+`weavejester/teensyp` that the port surfaced, which are not about Jolt — see
+[`UPSTREAM-TEENSYP-FINDINGS.md`](UPSTREAM-TEENSYP-FINDINGS.md).
+
 ## Verification baseline
 
 Revalidated 2026-07-23 against:
