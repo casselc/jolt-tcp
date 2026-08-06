@@ -1,0 +1,187 @@
+From 2dbaa81e4fc91dac95f14e4b331ea0d12abc1bb4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 6 Aug 2026 04:05:05 +0000
+Subject: [teensyp PATCH] Fix out-of-bounds reads in index-of-array and
+ read-line
+
+index-of-array probed the buffer before checking that the index was in
+range, and computed the loop bound one index short of the last legal
+start index.
+
+The unguarded probe meant that an empty buffer -- the normal state while
+waiting for more data -- threw IndexOutOfBoundsException from the first
+(.get buffer i), and a buffer holding fewer bytes than the needle threw
+from matches-tail-bytes?. Both should simply report that the needle is
+not present.
+
+The bound was worse. A needle of m bytes may legally start at any index
+up to (- limit m), but end was (- limit m 1) and the loop only continued
+while (< i end), so the last index tested was (- limit m 1). A needle
+occupying the final bytes of the buffer was therefore never found:
+searching "xxx\r\n" for "\r\n" returned -1 rather than 3. For a caller
+framing an incremental stream that is a false negative on a delimiter
+that has already arrived, so it waits for data the peer has sent.
+
+Computing end as the last legal start index and testing (<= i end)
+before reading fixes both. A region too short for the needle makes end
+less than the position, so the loop returns -1 without touching the
+buffer.
+
+read-line probed (.get buffer (dec index)) for a CR without checking
+that the probe stayed at or after the buffer's position. When the line
+is empty the LF sits at the position itself, so at position 0 this read
+index -1 and threw. A client whose first byte is a bare LF thus had its
+connection dropped, though RFC 9112 section 2.2 asks a server to ignore
+an empty line before the request line. At a position greater than zero
+the probe read an already-consumed byte instead; when that byte happened
+to be a CR the length went negative and byte-array threw. Requiring the
+probe to stay within the unread region covers both.
+---
+ src/clj/teensyp/buffer.clj   | 17 +++----
+ test/teensyp/buffer_test.clj | 87 +++++++++++++++++++++++++++++++++++-
+ 2 files changed, 94 insertions(+), 10 deletions(-)
+
+diff --git a/src/clj/teensyp/buffer.clj b/src/clj/teensyp/buffer.clj
+index 3117dda..2141ff3 100644
+--- a/src/clj/teensyp/buffer.clj
++++ b/src/clj/teensyp/buffer.clj
+@@ -47,14 +47,14 @@
+   (if (zero? (alength needle))
+     -1
+     (let [b   (aget needle 0)
+-          end (- (.limit buffer) (alength needle) 1)]
++          end (- (.limit buffer) (alength needle))] ; last index the needle can start at
+       (loop [i (.position buffer)]
+-        (if (and (= b (.get buffer i))
+-                 (matches-tail-bytes? buffer i needle))
+-          i
+-          (if (< i end)
+-            (recur (inc i))
+-            -1))))))
++        (if (<= i end)
++          (if (and (= b (.get buffer i))
++                   (matches-tail-bytes? buffer i needle))
++            i
++            (recur (inc i)))
++          -1)))))
+ 
+ (defn read-line
+   "Return the next line from the buffer, or nil if the buffer has no LF. Strips
+@@ -65,7 +65,8 @@
+         start (.position buffer)
+         index (index-of buffer LF)]
+     (when (not= index -1)
+-      (let [len (if (= CR (.get buffer (dec index)))
++      (let [len (if (and (> index start) ; the line may be empty, putting LF at start
++                         (= CR (.get buffer (dec index))))
+                   (- index start 1)
+                   (- index start))
+             bs  (byte-array len)]
+diff --git a/test/teensyp/buffer_test.clj b/test/teensyp/buffer_test.clj
+index c775e24..f84e784 100644
+--- a/test/teensyp/buffer_test.clj
++++ b/test/teensyp/buffer_test.clj
+@@ -34,7 +34,25 @@
+                   (buf/index-of-array (byte-array [111 108])))))
+     (is (= 7 (-> (ByteBuffer/wrap bs)
+                  (doto (.position 5))
+-                 (buf/index-of-array (byte-array [108 108])))))))
++                 (buf/index-of-array (byte-array [108 108]))))))
++  (is (= 3 (-> (ByteBuffer/wrap (byte-array [120 120 120 13 10]))
++               (buf/index-of-array (byte-array [13 10])))))
++  (is (= 0 (-> (ByteBuffer/wrap (byte-array [13 10]))
++               (buf/index-of-array (byte-array [13 10])))))
++  (is (= 3 (-> (ByteBuffer/wrap (byte-array [13 10 120 13 10]))
++               (doto (.position 2))
++               (buf/index-of-array (byte-array [13 10])))))
++  (is (= -1 (-> (ByteBuffer/allocate 0)
++                (buf/index-of-array (byte-array [13 10])))))
++  (is (= -1 (-> (ByteBuffer/wrap (byte-array [13]))
++                (buf/index-of-array (byte-array [13 10])))))
++  (is (= -1 (-> (ByteBuffer/wrap (byte-array [120 120 120]))
++                (buf/index-of-array (byte-array [13 10])))))
++  (is (= -1 (-> (ByteBuffer/wrap (byte-array [13 10 13]))
++                (doto (.position 2))
++                (buf/index-of-array (byte-array [13 10])))))
++  (is (= -1 (-> (ByteBuffer/wrap (byte-array [120 120 120]))
++                (buf/index-of-array (byte-array 0))))))
+ 
+ (deftest read-line-test
+   (let [buf (ByteBuffer/wrap (.getBytes "hello\nworld\n" ascii))]
+@@ -57,7 +75,72 @@
+     (is (= "c" (buf/read-line buf ascii)))
+     (is (= 6 (.position buf)))
+     (is (nil? (buf/read-line buf ascii)))
+-    (is (= 6 (.position buf)))))
++    (is (= 6 (.position buf))))
++  (let [buf (ByteBuffer/wrap (.getBytes "\nhello\n" ascii))]
++    (is (= "" (buf/read-line buf ascii)))
++    (is (= 1 (.position buf)))
++    (is (= "hello" (buf/read-line buf ascii)))
++    (is (= 7 (.position buf))))
++  (let [buf (ByteBuffer/wrap (.getBytes "\r\nhello\r\n" ascii))]
++    (is (= "" (buf/read-line buf ascii)))
++    (is (= 2 (.position buf))))
++  (let [buf (ByteBuffer/wrap (.getBytes "hello\n\nworld\n" ascii))]
++    (is (= "hello" (buf/read-line buf ascii)))
++    (is (= "" (buf/read-line buf ascii)))
++    (is (= 7 (.position buf)))
++    (is (= "world" (buf/read-line buf ascii))))
++  (let [buf (doto (ByteBuffer/wrap (.getBytes "\r\n" ascii)) (.position 1))]
++    (is (= "" (buf/read-line buf ascii)))
++    (is (= 2 (.position buf)))))
++
++(defn- naive-index-of-array [^ByteBuffer buffer ^bytes needle]
++  (if (zero? (alength needle))
++    -1
++    (or (first (for [i (range (.position buffer)
++                              (inc (- (.limit buffer) (alength needle))))
++                     :when (every? #(= (.get buffer (int (+ i %))) (aget needle %))
++                                   (range (alength needle)))]
++                 i))
++        -1)))
++
++(defn- naive-read-line [^ByteBuffer buffer ^Charset charset]
++  (let [bs (byte-array (.remaining buffer))
++        _  (.get (.duplicate buffer) bs)
++        bs (vec bs)
++        i  (first (keep-indexed (fn [i b] (when (= 0x0A b) i)) bs))]
++    (when i
++      (let [line (subvec bs 0 i)
++            line (if (= 0x0D (peek line)) (pop line) line)]
++        (.position buffer (int (+ (.position buffer) i 1)))
++        (String. (byte-array line) charset)))))
++
++(defn- byte-seqs
++  "Every sequence of the given bytes up to the given length."
++  [bytes max-len]
++  (mapcat #(reduce (fn [ss _] (for [s ss, b bytes] (conj s b)))
++                   [[]] (range %))
++          (range (inc max-len))))
++
++(deftest index-of-array-naive-test
++  (is (empty? (for [hay    (byte-seqs [0x0D 0x0A 0x78] 4)
++                    needle (byte-seqs [0x0D 0x0A 0x78] 2)
++                    pos    (range (inc (count hay)))
++                    :let [bs (byte-array hay)
++                          nd (byte-array needle)
++                          at #(doto (ByteBuffer/wrap %) (.position pos))]
++                    :when (not= (naive-index-of-array (at bs) nd)
++                                (buf/index-of-array (at bs) nd))]
++                [hay needle pos]))))
++
++(deftest read-line-naive-test
++  (is (empty? (for [hay (byte-seqs [0x0D 0x0A 0x78] 4)
++                    pos (range (inc (count hay)))
++                    :let [bs (byte-array hay)
++                          a  (doto (ByteBuffer/wrap bs) (.position pos))
++                          b  (doto (ByteBuffer/wrap bs) (.position pos))]
++                    :when (not= [(naive-read-line a ascii) (.position a)]
++                                [(buf/read-line b ascii) (.position b)])]
++                [hay pos]))))
+ 
+ (deftest copy-test
+   (let [buf (buf/buffer 5)
+-- 
+2.43.0
+

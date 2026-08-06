@@ -1,0 +1,310 @@
+From 353fc543a9404a2224159fab040ec57a71aaae5e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 6 Aug 2026 04:25:53 +0000
+Subject: [teensyp PATCH] Keep the reactor alive when a key or an option fails
+
+The server loop wraps its body in try/finally with no catch, so any
+exception escaping handle-key or handle-pending unwinds into the finally,
+shuts down the executor, runs every close arity and closes the selector.
+The returned Closeable still looks healthy, so the server is silently
+dead. Three paths reach it: handle-accept catches nothing (accept may
+return null on a non-blocking channel, and throws on ECONNABORTED or
+EMFILE), handle-key can see CancelledKeyException because a worker thread
+closes channels through handle-close, and submit throws
+RejectedExecutionException once the executor is shutting down.
+
+Isolate the per-key dispatch in handle-key and handle-pending, so a
+failing connection is closed and logged instead of taking the reactor
+with it. Treat a null from accept as nothing to do, close an accepted
+socket we cannot register, and back off briefly when the listener itself
+is failing, rather than spinning on a readiness we cannot service. Errors
+are reported through a new :error-logger option, which defaults to
+printing to *err*.
+
+Also apply :reuse-address? and :recv-buffer-size between open and bind.
+Both are documented, but SO_REUSEADDR only affects the bind it precedes
+and SO_RCVBUF must be set before the listen for accepted sockets to
+inherit it, so both were no-ops. Replace the Integer constructor, which
+is deprecated for removal, with Integer/valueOf, and check :handler in
+the precondition so a missing handler fails at startup instead of as an
+NPE inside the reactor.
+---
+ src/clj/teensyp/server.clj   | 101 +++++++++++++++++++++-------------
+ test/teensyp/server_test.clj | 102 ++++++++++++++++++++++++++++++++++-
+ 2 files changed, 165 insertions(+), 38 deletions(-)
+
+diff --git a/src/clj/teensyp/server.clj b/src/clj/teensyp/server.clj
+index 12fd8fe..e145416 100644
+--- a/src/clj/teensyp/server.clj
++++ b/src/clj/teensyp/server.clj
+@@ -12,10 +12,16 @@
+            [java.util.concurrent.atomic AtomicInteger]
+            [java.util.concurrent.locks ReentrantLock]))
+ 
+-(defn- server-socket-channel ^ServerSocketChannel [port]
+-  (doto (ServerSocketChannel/open)
+-    (.configureBlocking false)
+-    (.bind (InetSocketAddress. port))))
++(defn- server-socket-channel
++  ^ServerSocketChannel [port {:keys [recv-buffer-size reuse-address?]}]
++  (let [server-ch (ServerSocketChannel/open)]
++    (.configureBlocking server-ch false)
++    (when reuse-address?
++      (.setOption server-ch StandardSocketOptions/SO_REUSEADDR true))
++    (when recv-buffer-size
++      (.setOption server-ch StandardSocketOptions/SO_RCVBUF
++                  (Integer/valueOf ^long recv-buffer-size)))
++    (.bind server-ch (InetSocketAddress. port))))
+ 
+ (defn- server-selector ^Selector [^ServerSocketChannel server-ch]
+   (let [selector (Selector/open)]
+@@ -220,23 +226,41 @@
+     (set-flag key CLOSED)
+     (.add pending-set key)))
+ 
++(defn- default-error-logger [ex]
++  (binding [*out* *err*] (prn ex) (flush)))
++
++(defn- log-error
++  [ex {:keys [error-logger] :or {error-logger default-error-logger}}]
++  (error-logger ex))
++
++(defn- handle-error [^SelectionKey key ex opts]
++  (log-error ex opts)
++  (if (instance? SocketChannel (.channel key))
++    (try (handle-close key ex)
++         (catch IOException _ex))
++    (Thread/sleep 100)))  ;; back off; the listener itself is failing
++
+ (defn- handle-accept
+   [^SelectionKey key submit ^Set pending-set {:keys [handler] :as opts}]
+-  (let [^Selector selector (.selector key)
+-        ^SocketChannel  ch (.accept ^ServerSocketChannel (.channel key))]
+-    (.configureBlocking ch false)
+-    (.setOption ch StandardSocketOptions/TCP_NODELAY true)
+-    (let [^Context context (new-context ch pending-set opts)
+-          state            (.state context)
+-          key              (.register ch selector 0 context)]
+-      (set-flag key WORKING)
+-      (submit #(try (vreset! state (handler key))
+-                    (catch Exception ex
+-                      (handle-close key ex))
+-                    (finally
+-                      (.add pending-set key)
+-                      (unset-flag key WORKING)
+-                      (.wakeup selector)))))))
++  (let [^Selector selector (.selector key)]
++    (when-some [^SocketChannel ch (.accept ^ServerSocketChannel (.channel key))]
++      (try
++        (.configureBlocking ch false)
++        (.setOption ch StandardSocketOptions/TCP_NODELAY true)
++        (let [^Context context (new-context ch pending-set opts)
++              state            (.state context)
++              key              (.register ch selector 0 context)]
++          (set-flag key WORKING)
++          (submit #(try (vreset! state (handler key))
++                        (catch Exception ex
++                          (handle-close key ex))
++                        (finally
++                          (.add pending-set key)
++                          (unset-flag key WORKING)
++                          (.wakeup selector)))))
++        (catch Throwable ex
++          (.close ch)          ;; roll back a socket we cannot serve
++          (log-error ex opts))))))
+ 
+ (defn- compact-buffer-by-amount [^ByteBuffer buffer ^long n]
+   (if (zero? n)
+@@ -306,12 +330,16 @@
+            (handle-close key ex)))))
+ 
+ (defn- handle-key [^SelectionKey key submit pending opts]
+-  (when (and (.isValid key) (.isAcceptable key))
+-    (handle-accept key submit pending opts))
+-  (when (and (.isValid key) (.isReadable key))
+-    (handle-read key submit opts))
+-  (when (and (.isValid key) (.isWritable key))
+-    (handle-write key submit))
++  (try
++    (when (and (.isValid key) (.isAcceptable key))
++      (handle-accept key submit pending opts))
++    (when (and (.isValid key) (.isReadable key))
++      (handle-read key submit opts))
++    (when (and (.isValid key) (.isWritable key))
++      (handle-write key submit))
++    (catch CancelledKeyException _ex)
++    (catch Throwable ex
++      (handle-error key ex opts)))
+   true)
+ 
+ (defn- handle-pending-read [^SelectionKey key submit opts]
+@@ -361,9 +389,13 @@
+ 
+ (defn- handle-pending [^SelectionKey key submit opts]
+   (when-not (has-flag? key WORKING)
+-    (handle-pending-read key submit opts)
+-    (handle-pending-close key submit opts)
+-    (handle-control key submit opts)
++    (try
++      (handle-pending-read key submit opts)
++      (handle-pending-close key submit opts)
++      (handle-control key submit opts)
++      (catch CancelledKeyException _ex)
++      (catch Throwable ex
++        (handle-error key ex opts)))
+     true))
+ 
+ (defn- shutdown-key [^SelectionKey key {:keys [handler]}]
+@@ -407,6 +439,8 @@
+   - `:handler` - a handler function (mandatory, see below)
+   - `:control-queue-size` - the max number of queued control events (default 32)
+   - `:direct-read-buffer?` - allocate a direct buffer for reads (default false)
++  - `:error-logger` - a function that takes a single exception argument and
++    logs it somehow (defaults to printing to *err*)
+   - `:executor` - a custom ExecutorService to supply worker threads
+   - `:read-buffer-size` - the read buffer size in bytes (default 8K)
+   - `:recv-buffer-size` - the receive buffer size (i.e. the SO_RCVBUF option)
+@@ -438,16 +472,11 @@
+   The returned server instance implements `java.io.Closeable`, and therefore
+   can be used with the `with-open` macro."
+   ^Closeable
+-  [& {:keys [port executor recv-buffer-size reuse-address?] :as opts}]
+-  {:pre [(int? port)]}
+-  (let [server-ch (server-socket-channel port)
++  [& {:keys [port handler executor] :as opts}]
++  {:pre [(int? port) (ifn? handler)]}
++  (let [server-ch (server-socket-channel port opts)
+         selector  (server-selector server-ch)
+         executor  (or executor (new-default-executor))]
+-    (when reuse-address?
+-      (.setOption server-ch StandardSocketOptions/SO_REUSEADDR true))
+-    (when recv-buffer-size
+-      (.setOption server-ch StandardSocketOptions/SO_RCVBUF
+-                  (Integer. ^long recv-buffer-size)))
+     (.start (Thread. #(server-loop server-ch selector executor opts)))
+     (reify Server
+       (server-channel [_] server-ch)
+diff --git a/test/teensyp/server_test.clj b/test/teensyp/server_test.clj
+index 7d11e2f..7bd640e 100644
+--- a/test/teensyp/server_test.clj
++++ b/test/teensyp/server_test.clj
+@@ -4,9 +4,12 @@
+             [teensyp.server :as tcp]
+             [teensyp.buffer :as buf])
+   (:import [java.io BufferedReader]
+-           [java.net InetSocketAddress Socket StandardSocketOptions]
++           [java.net BindException InetSocketAddress Socket
++            StandardSocketOptions]
+            [java.nio ByteBuffer]
+-           [java.nio.charset StandardCharsets]))
++           [java.nio.charset StandardCharsets]
++           [java.util.concurrent LinkedBlockingQueue RejectedExecutionException
++            ThreadPoolExecutor TimeUnit]))
+ 
+ (defn- nil-handler
+   ([_socket])
+@@ -371,6 +374,101 @@
+           (doto writer (.write "foo") (.write "bar\n") .flush)
+           (is (= "foobar" (.readLine reader))))))))
+ 
++(defn- greet-handler
++  ([socket] (tcp/write socket (->buffer "hello\n")))
++  ([_state _socket _buffer])
++  ([_state _exception]))
++
++(defn- read-greeting [port]
++  (with-open [sock (doto (Socket. "localhost" port) (.setSoTimeout 2000))]
++    (with-open [reader ^BufferedReader (io/reader (.getInputStream sock))]
++      (.readLine reader))))
++
++(defn- rejecting-executor
++  "An executor that throws RejectedExecutionException while `reject?` holds
++  true, as a shutting down executor would."
++  [reject?]
++  (proxy [ThreadPoolExecutor]
++         [2 2 0 TimeUnit/MILLISECONDS (LinkedBlockingQueue.)]
++    (execute [^Runnable task]
++      (if @reject?
++        (throw (RejectedExecutionException. "testing"))
++        (proxy-super execute task)))))
++
++(deftest server-error-isolation-test
++  (testing "exception in the handler"
++    (let [attempts (atom 0)]
++      (with-open [_ (tcp/run-server
++                     {:port 3475
++                      :handler
++                      (fn
++                        ([sock]
++                         (if (= 1 (swap! attempts inc))
++                           (throw (ex-info "Testing" {}))
++                           (tcp/write sock (->buffer "hello\n"))))
++                        ([_ _ _])
++                        ([_ _]))})]
++        (is (nil? (read-greeting 3475)))
++        (is (= "hello" (read-greeting 3475))))))
++  (testing "exception on the accept path"
++    (let [reject? (atom false)
++          errors  (atom [])]
++      (with-open [_ (tcp/run-server
++                     {:port 3476
++                      :handler greet-handler
++                      :error-logger #(swap! errors conj %)
++                      :executor (rejecting-executor reject?)})]
++        (is (= "hello" (read-greeting 3476)))
++        (reset! reject? true)
++        (is (nil? (read-greeting 3476)))
++        (reset! reject? false)
++        (is (= "hello" (read-greeting 3476)))
++        (is (seq @errors))
++        (is (every? #(instance? RejectedExecutionException %) @errors)))))
++  (testing "exception on the pending path"
++    (let [reject? (atom false)
++          errors  (atom [])]
++      (with-open [_ (tcp/run-server
++                     {:port 3477
++                      :handler greet-handler
++                      :error-logger #(swap! errors conj %)
++                      :executor (rejecting-executor reject?)})]
++        (is (= "hello" (read-greeting 3477)))
++        (let [sock (Socket. "localhost" 3477)]
++          (Thread/sleep 50)
++          (reset! reject? true)  ; fail the queued close arity
++          (.close sock)
++          (Thread/sleep 50))
++        (reset! reject? false)
++        (is (= "hello" (read-greeting 3477)))
++        (is (seq @errors))
++        (is (every? #(instance? RejectedExecutionException %) @errors))))))
++
++(defn- run-server-when-free
++  "Rebinding races the selector's deferred close of the previous listening
++  channel, so retry for a short while."
++  [opts]
++  (loop [attempts 50]
++    (or (try (tcp/run-server opts)
++             (catch BindException ex
++               (when (zero? attempts) (throw ex))))
++        (do (Thread/sleep 10) (recur (dec attempts))))))
++
++(deftest server-reuse-address-test
++  (let [opts {:port 3478, :handler hello-handler, :reuse-address? true}]
++    (with-open [server (tcp/run-server opts)]
++      (is (true? (.getOption (tcp/server-channel server)
++                             StandardSocketOptions/SO_REUSEADDR)))
++      (with-open [sock (Socket. "localhost" 3478)]
++        (let [in (.getInputStream sock)]
++          (while (nat-int? (.read in))))))  ; server closes first: TIME_WAIT
++    (with-open [server (run-server-when-free opts)]
++      (is (instance? java.io.Closeable server)))))
++
++(deftest server-required-options-test
++  (is (thrown? AssertionError (tcp/run-server {:port 3479})))
++  (is (thrown? AssertionError (tcp/run-server {:handler nil-handler}))))
++
+ (deftest resume-writes-only-test
+   (let [socket (promise)
+         buffer (atom [])]
+-- 
+2.43.0
+
