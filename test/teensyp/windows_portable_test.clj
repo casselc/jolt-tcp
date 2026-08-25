@@ -7,6 +7,7 @@
   the current readiness boundary to fail closed."
   (:require [clojure.test :as t]
             [jolt.net :as net]
+            [jolt.net.target :as target]
             [teensyp.client-test]
             [teensyp.server]))
 
@@ -38,10 +39,10 @@
         (net/close! poller))
       (t/test-vars portable-client-vars)
       (let [failed (+ (t/n-fail) (t/n-error))]
-        (when-not (= :windows (:os (jolt.host/target)))
+        (when-not (= :windows (:os (target/current-target)))
           (throw
             (ex-info "portable gate did not run on Windows"
-                     {:target (jolt.host/target)})))
+                     {:target (target/current-target)})))
         (when-not (= :unsupported-target
                      (:jolt.net/kind (ex-data (:error poller-result))))
           (throw

@@ -4,6 +4,24 @@ This document records changes to Jolt, `jolt.ffi`, and the Jolt runtime that
 would make jolt-tcp safer, smaller, or faster. It is a local planning document,
 not an upstream issue tracker.
 
+## Release refresh — 2026-08-25
+
+This document's v0.4.15 probes are historical evidence, not a current Jolt
+capability list. Official Jolt v0.7.27 now includes the fixes first requested
+here for real CPU counts and monotonic time, `System/arraycopy`, SIGPIPE-safe
+IPv4 sockets with peer information, variadic FFI, public fibers,
+thread-correct `jolt.ffi/errno`, exact-width integers, scoped allocation,
+declarative struct layouts, and struct-by-value calls. Use the released APIs
+instead of copying the manual workarounds below.
+
+jolt-net no longer depends on the proposal-only target descriptor or scoped
+byte-array pointer loan. It now derives its exact host tuple from released APIs
+and uses scoped scratch buffers with `read-into!`/sliced `write-array`, passing
+all 213 checks on stock v0.7.27. A future pointer loan is an optimization only.
+The concurrent-FFI stress history and the broader jolt-net lifecycle/capability
+design also remain separate review obligations; a nearby released API does not
+by itself close them.
+
 ## Verification baseline
 
 Revalidated 2026-07-23 against:

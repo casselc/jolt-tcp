@@ -5,7 +5,7 @@
             [teensyp.buffer-property-test]))
 
 (defn -main [& _]
-  (let [observed (jolt.host/target)
+  (let [observed (target/current-target)
         descriptor-error (try
                            (target/descriptor observed)
                            nil

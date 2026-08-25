@@ -97,7 +97,7 @@
       0)))
 
 (defn- monotonic-now []
-  (jolt.host/monotonic-nanos))
+  (System/nanoTime))
 
 (defn- deadline-expired? [deadline now-fn]
   (and deadline (>= (now-fn) deadline)))
@@ -678,7 +678,7 @@
   `:recv-buffer-size`) pass through. Deadline policy is either
   `:connect-timeout-ms` (default 30000), explicit
   `:connect-timeout-ms nil` for an unbounded connect, or an absolute
-  `:deadline-nanos` in `jolt.host/monotonic-nanos` units. A bounded timeout
+  `:deadline-nanos` in `System/nanoTime` units. A bounded timeout
   covers resolution and every resolver candidate; it is never restarted
   between candidates."
   ([endpoint] (connect-endpoint endpoint {}))

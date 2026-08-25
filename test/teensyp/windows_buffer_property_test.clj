@@ -1,6 +1,7 @@
 (ns teensyp.windows-buffer-property-test
   "Native Windows gate for the descriptor-independent buffer properties."
   (:require [clojure.test :as t]
+            [jolt.net.target :as target]
             [teensyp.buffer-property-test]))
 
 (defn- test-vars-in [namespace]
@@ -10,7 +11,7 @@
        (sort-by #(str (:name (meta %))))))
 
 (defn -main [& _]
-  (let [observed (jolt.host/target)
+  (let [observed (target/current-target)
         buffer-vars (vec (test-vars-in 'teensyp.buffer-property-test))]
     (when-not (= :windows (:os observed))
       (throw

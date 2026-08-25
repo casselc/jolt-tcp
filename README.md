@@ -46,7 +46,7 @@ A production blocking outbound client over `jolt.net`:
   order. `:connect-timeout-ms` defaults to 30000; explicitly passing
   `:connect-timeout-ms nil` selects an unbounded connect. Callers that already
   compose deadlines may pass one absolute `:deadline-nanos` in
-  `jolt.host/monotonic-nanos` units. The one deadline covers resolution and
+  `System/nanoTime` units. The one deadline covers resolution and
   every candidate rather than restarting for each address. The current
   `jolt.net` resolver is synchronous: an over-deadline result is rejected, but
   an in-flight `getaddrinfo` cannot yet be preempted.
@@ -204,20 +204,17 @@ delegate to the production `teensyp.client` surface.
 ## Testing
 
 ```sh
-JOLT_PWD="$PWD" /path/to/reviewed-jolt/bin/joltc \
-  -A:test -m hegel.install
-JOLT_HEGEL_REQUIRED=1 JOLT_PWD="$PWD" \
-  /path/to/reviewed-jolt/bin/joltc -M:test
+jolt -A:test -m hegel.install
+JOLT_HEGEL_REQUIRED=1 jolt -A:workspace -M:test
 ```
 
-The reviewed Jolt core is commit
-`85f645aa1178e4b631198dcbaf46bdad1283750b`; `deps.edn` pins the reviewed
-combined jolt-net W1/W2 revision
-`7de096d0f02f0f452124a110cbbd4f5b966f4c67`. The required-mode environment
-variable prevents a missing or unloadable libhegel from silently skipping the
-property layers.
+The local `:workspace` alias selects the adjacent stock-v0.7.27-compatible
+`jolt-net` checkout until that commit has a published Git SHA. The normal
+dependency remains pinned to the last published revision, so release packaging
+must update that SHA before dropping the workspace alias. Required Hegel mode
+prevents a missing native library from silently skipping the property layers.
 
-Three layers, all gated by the single `-M:test` command, which exits
+Three layers, all gated by the single `-A:workspace -M:test` command, which exits
 non-zero on any failure.
 
 **Acceptance** (`teensyp.server-test`) — the framework-less harness. Starts
