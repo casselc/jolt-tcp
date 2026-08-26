@@ -38,7 +38,9 @@ the exact upstream SHA before removing a workaround.
 The historical Jolt proposal fork remains published only to `casselc/jolt` on
 `codex/upstream-improvements-6-8`; current CI no longer selects it. Runtime
 lanes use official Jolt v0.7.27 source, including on Windows and Intel macOS
-where no release binary is available. The known-unsound runtime AOT prototype
+where no release binary is available. Windows source mode applies the
+checked-in drive/UNC absolute-path host-I/O compatibility patch pending its
+upstream release. The known-unsound runtime AOT prototype
 remains isolated on `research/aot-v5-prototype` at `21062d5b` and is not part
 of the current runtime path.
 

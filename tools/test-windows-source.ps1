@@ -81,17 +81,9 @@ function Invoke-Jolt {
 
 Push-Location $RuntimePath
 try {
-  # Jolt v0.7.27 source mode resolves JOLT_PWD as a path relative to the
-  # runtime checkout. On Windows it does not recognize an absolute drive path
-  # before joining, which duplicates the path (for example D:\repo\D:\repo).
-  # Keep source mode rooted at the runtime while providing the project as a
-  # resolved relative path. Unknown/different drives fail here rather than
-  # selecting the wrong deps.edn.
-  $projectPath = (Resolve-Path -Relative $JoltTcpPath)
-  if ([System.IO.Path]::IsPathRooted($projectPath)) {
-    throw "test-windows-source.ps1: runtime and project must share a drive"
-  }
-  $env:JOLT_PWD = $projectPath
+  # The checked-in v0.7.27 compatibility patch makes Jolt host I/O recognize
+  # Windows drive and UNC paths, so retain the real absolute project directory.
+  $env:JOLT_PWD = (Resolve-Path $JoltTcpPath).Path
 
   Write-Host "jolt-tcp native Windows source gate"
   Write-Host "  JOLT_PWD = $env:JOLT_PWD"

@@ -208,6 +208,15 @@ jobs:
           submodules: recursive
           path: jolt
 
+      - name: Apply v0.7.27 Windows drive-path compatibility patch
+        shell: pwsh
+        working-directory: jolt
+        run: |
+          git apply --check `
+            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
+          git apply `
+            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
+
       - name: Run dependency-free portable TCP contracts
         shell: powershell
         env:
@@ -273,6 +282,15 @@ jobs:
           ref: v0.7.27
           submodules: recursive
           path: jolt
+
+      - name: Apply v0.7.27 Windows drive-path compatibility patch
+        shell: pwsh
+        working-directory: jolt
+        run: |
+          git apply --check `
+            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
+          git apply `
+            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
 
       - name: Assert native Chez for source-mode Jolt
         shell: pwsh

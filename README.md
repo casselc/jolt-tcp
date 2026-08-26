@@ -193,6 +193,9 @@ delegate to the production `teensyp.client` surface.
   `jolt.net` includes reviewed W1/W2 blocking and non-blocking byte-I/O
   substrate, but neither gate is **socket-runtime support**: no TCP
   server/client loopback test is enabled until Windows readiness exists.
+  Both Windows source-mode lanes apply the checked-in, fail-closed v0.7.27
+  drive/UNC absolute-path compatibility patch; remove it when that host-I/O fix
+  is available in the minimum supported Jolt release.
 - Windows aarch64 has a non-gating public-preview source-mode lane on
   `windows-11-vs2026-arm`. It builds native `tarm64nt` Chez 10.4.1 and runs the
   descriptor-independent `teensyp.buffer` property suite through the upstream
