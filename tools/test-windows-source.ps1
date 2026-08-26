@@ -32,7 +32,6 @@ if (-not $TestAlias.StartsWith("-M:")) {
   throw "test-windows-source.ps1: TestAlias must be a -M: alias"
 }
 
-$env:JOLT_PWD = $JoltTcpPath
 $env:JOLT_AOT_CACHE = "0"
 $env:JOLT_VERSION = "v0.7.27"
 $env:JOLT_SH = "C:\Program Files\Git\bin\sh.exe"
@@ -80,16 +79,24 @@ function Invoke-Jolt {
   }
 }
 
-Write-Host "jolt-tcp native Windows source gate"
-Write-Host "  JOLT_PWD = $env:JOLT_PWD"
-Write-Host "  runtime  = $RuntimePath"
-Write-Host "  scheme   = $ChezExe"
-Write-Host "  alias    = $TestAlias"
-Write-Host "  hegel    = $InstallHegel"
-Write-Host ""
-
 Push-Location $RuntimePath
 try {
+  # Jolt v0.7.27 source mode resolves JOLT_PWD as a path relative to the
+  # runtime checkout. On Windows it does not recognize an absolute drive path
+  # before joining, which duplicates the path (for example D:\repo\D:\repo).
+  # Keep source mode rooted at the runtime while providing the project as a
+  # resolved relative path. Unknown/different drives fail here rather than
+  # selecting the wrong deps.edn.
+  $env:JOLT_PWD = (Resolve-Path -Relative $JoltTcpPath)
+
+  Write-Host "jolt-tcp native Windows source gate"
+  Write-Host "  JOLT_PWD = $env:JOLT_PWD"
+  Write-Host "  runtime  = $RuntimePath"
+  Write-Host "  scheme   = $ChezExe"
+  Write-Host "  alias    = $TestAlias"
+  Write-Host "  hegel    = $InstallHegel"
+  Write-Host ""
+
   if ($InstallHegel) {
     $installAlias = "-A:" + $TestAlias.Substring(3)
     Invoke-Jolt -Phase "Install libhegel for $installAlias" `

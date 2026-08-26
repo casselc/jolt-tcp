@@ -98,18 +98,18 @@ jobs:
           submodules: recursive
           path: jolt
 
-      # libhegel 0.30.1 has no Darwin/x86_64 release asset. Build the exact
+      # libhegel 0.33.0 has no Darwin/x86_64 release asset. Build the exact
       # tagged source so Intel macOS still runs the complete property suite.
       - name: Checkout pinned libhegel source (macOS x86_64)
         if: runner.os == 'macOS' && runner.arch == 'X64'
         uses: actions/checkout@v4
         with:
           repository: hegeldev/hegel-rust
-          ref: f81c6cceabe3c6695a249588c751a5ce93dffa00
+          ref: e5fcdb10d422ceadb635991353b1c9b20ee4a697
           persist-credentials: false
           path: hegel-rust
 
-      - name: Build pinned libhegel 0.30.1 (macOS x86_64)
+      - name: Build pinned libhegel 0.33.0 (macOS x86_64)
         if: runner.os == 'macOS' && runner.arch == 'X64'
         working-directory: hegel-rust
         shell: bash

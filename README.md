@@ -183,7 +183,7 @@ delegate to the production `teensyp.client` surface.
 - Linux aarch64 (`ubuntu-24.04-arm`) and macOS x86_64
   (`macos-15-intel`) have equivalent full-runtime jobs configured. Treat both
   as candidate coverage until those jobs are observed green on this revision.
-  Because libhegel 0.30.1 publishes no Darwin/x86_64 asset, the Intel job builds
+  Because libhegel 0.33.0 publishes no Darwin/x86_64 asset, the Intel job builds
   its exact tagged source and supplies the resulting library explicitly.
 - Windows x86_64 has candidate native layered gates. The first source-builds
   Chez, loads the production TCP namespaces, runs the platform-independent
