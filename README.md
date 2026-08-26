@@ -205,16 +205,14 @@ delegate to the production `teensyp.client` surface.
 
 ```sh
 jolt -A:test -m hegel.install
-JOLT_HEGEL_REQUIRED=1 jolt -A:workspace -M:test
+JOLT_HEGEL_REQUIRED=1 jolt -M:test
 ```
 
-The local `:workspace` alias selects the adjacent stock-v0.7.27-compatible
-`jolt-net` checkout until that commit has a published Git SHA. The normal
-dependency remains pinned to the last published revision, so release packaging
-must update that SHA before dropping the workspace alias. Required Hegel mode
-prevents a missing native library from silently skipping the property layers.
+The normal dependency graph pins the reviewed stock-v0.7.27-compatible
+`jolt-net` topic commit. Required Hegel mode prevents a missing native library
+from silently skipping the property layers.
 
-Three layers, all gated by the single `-A:workspace -M:test` command, which exits
+Three layers, all gated by the single `-M:test` command, which exits
 non-zero on any failure.
 
 **Acceptance** (`teensyp.server-test`) — the framework-less harness. Starts

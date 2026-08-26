@@ -45,7 +45,7 @@
   source:
 
     TEENSYP_HEGEL_SEED=1767470842619
-    TEENSYP_HEGEL_ONLY=line-framing jolt -A:workspace -M:test"
+    TEENSYP_HEGEL_ONLY=line-framing jolt -M:test"
   [opts]
   (if-let [seed (nonblank-env "TEENSYP_HEGEL_SEED")]
     (assoc opts :seed (parse-long seed))

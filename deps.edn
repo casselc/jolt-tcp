@@ -6,7 +6,7 @@
 
  :deps {io.github.casselc/jolt-net
         {:git/url "https://github.com/casselc/jolt-net.git"
-         :git/sha "7de096d0f02f0f452124a110cbbd4f5b966f4c67"}}
+         :git/sha "10542fcac421ec1466b6db55fe702483f9c0c97e"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,
@@ -16,12 +16,6 @@
                                {:git/url "https://github.com/chucklehead-dev/jolt-hegel.git"
                                 :git/sha "53631c81cd927175935037699ddf687d98a44d24"}}
                   :main-opts ["-m" "teensyp.server-test"]}
-           ;; Use the adjacent released-Jolt migration while its commit remains
-           ;; local. Replace the main dependency SHA when jolt-net is published.
-           :workspace
-           {:override-deps {io.github.casselc/jolt-net
-                            {:local/root "../jolt-net"}}}
-
            ;; Checked-in mains keep each native source-mode claim explicit.
            :windows-portable-test
            {:extra-paths ["test"]
@@ -39,4 +33,4 @@
                           :git/sha "53631c81cd927175935037699ddf687d98a44d24"}}
             :main-opts ["-m" "teensyp.windows-arm64-preview"]}}
 
- :tasks {test "jolt -A:workspace -M:test"}}
+ :tasks {test "jolt -M:test"}}
