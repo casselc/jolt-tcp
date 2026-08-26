@@ -87,13 +87,14 @@ jobs:
           "$bindir/chez" --version | tee /tmp/chez-version
           grep -Fq '10.4.1' /tmp/chez-version
 
-      # This is the reviewed core containing the host/FFI primitives required
-      # by the exact jolt-net dependency in deps.edn.
-      - name: Checkout pinned Jolt core
+      # Run the exact minimum released source claimed by deps.edn. The source
+      # checkout keeps Intel macOS covered even though no release binary is
+      # published for that runner architecture.
+      - name: Checkout official Jolt v0.7.27
         uses: actions/checkout@v4
         with:
-          repository: casselc/jolt
-          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          repository: jolt-lang/jolt
+          ref: v0.7.27
           submodules: recursive
           path: jolt
 
@@ -123,7 +124,7 @@ jobs:
       - name: Install libhegel
         shell: bash
         run: |
-          JOLT_PWD="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/jolt/bin/joltc" \
+          JOLT_PWD="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/jolt/bin/jolt" \
             -A:test -m hegel.install
 
       - name: Run tests
@@ -131,7 +132,7 @@ jobs:
         env:
           JOLT_HEGEL_REQUIRED: "1"
         run: |
-          JOLT_PWD="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/jolt/bin/joltc" -M:test
+          JOLT_PWD="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/jolt/bin/jolt" -M:test
 
 # The pinned jolt.net has reviewed Windows W1/W2 blocking and non-blocking byte
 # I/O, but no readiness backend. Keep native layers anyway: source-build Chez,
@@ -199,11 +200,11 @@ jobs:
           "$bindir/chez" --version | tee "$RUNNER_TEMP/chez-version"
           grep -Fq '10.4.1' "$RUNNER_TEMP/chez-version"
 
-      - name: Checkout pinned Jolt core
+      - name: Checkout official Jolt v0.7.27
         uses: actions/checkout@v4
         with:
-          repository: casselc/jolt
-          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          repository: jolt-lang/jolt
+          ref: v0.7.27
           submodules: recursive
           path: jolt
 
@@ -265,11 +266,11 @@ jobs:
           cd /d "%GITHUB_WORKSPACE%\chez-arm64"
           call build.bat tarm64nt /only
 
-      - name: Checkout pinned Jolt core
+      - name: Checkout official Jolt v0.7.27
         uses: actions/checkout@v4
         with:
-          repository: casselc/jolt
-          ref: 85f645aa1178e4b631198dcbaf46bdad1283750b
+          repository: jolt-lang/jolt
+          ref: v0.7.27
           submodules: recursive
           path: jolt
 

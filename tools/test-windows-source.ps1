@@ -6,11 +6,11 @@
 .DESCRIPTION
   Invokes native Chez directly. It does not route native paths or Clojure source
   through a bash wrapper, and it never relies on the current `/dev/stdin`
-  implementation of `joltc -`.
+  implementation of `jolt -`.
 #>
 param(
   [string]$JoltTcpPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
-  [string]$RuntimePath = "D:\src\jolt-proposal",
+  [string]$RuntimePath = "D:\src\jolt",
   [string]$ChezExe = "D:\chez-10.4.1\bin\scheme.exe",
   [string]$TestAlias = "-M:windows-portable-test",
   [switch]$InstallHegel,
@@ -34,7 +34,7 @@ if (-not $TestAlias.StartsWith("-M:")) {
 
 $env:JOLT_PWD = $JoltTcpPath
 $env:JOLT_AOT_CACHE = "0"
-$env:JOLT_VERSION = "dev"
+$env:JOLT_VERSION = "v0.7.27"
 $env:JOLT_SH = "C:\Program Files\Git\bin\sh.exe"
 
 function Invoke-Jolt {
