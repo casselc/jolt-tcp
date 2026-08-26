@@ -87,7 +87,11 @@ try {
   # Keep source mode rooted at the runtime while providing the project as a
   # resolved relative path. Unknown/different drives fail here rather than
   # selecting the wrong deps.edn.
-  $env:JOLT_PWD = (Resolve-Path -Relative $JoltTcpPath)
+  $projectPath = (Resolve-Path -Relative $JoltTcpPath)
+  if ([System.IO.Path]::IsPathRooted($projectPath)) {
+    throw "test-windows-source.ps1: runtime and project must share a drive"
+  }
+  $env:JOLT_PWD = $projectPath
 
   Write-Host "jolt-tcp native Windows source gate"
   Write-Host "  JOLT_PWD = $env:JOLT_PWD"
