@@ -46,7 +46,21 @@
          reconcile-registration! reconcile-shutdown-registration!)
 
 ;; --- small helpers ---------------------------------------------------------
-(defn- submit [srv f] (.execute (:executor srv) f))
+(defn- execute!
+  "Submit through the portable Executor boundary.
+
+  Jolt v0.7.27's modeled ExecutorService can accept `execute` after shutdown
+  without throwing even though no worker can run the task. Detect that terminal
+  state before admission so every caller retains its synchronous-rejection
+  cleanup contract. Plain Executor implementations still delegate directly."
+  [executor f]
+  (when (try (true? (.isShutdown executor))
+             (catch :default _ false))
+    (throw (ex-info "ExecutorService is shut down"
+                    {:err ::executor-shutdown})))
+  (.execute executor f))
+
+(defn- submit [srv f] (execute! (:executor srv) f))
 
 (defn- task-tracker []
   (atom {:accepting? true :active #{}}))
@@ -95,7 +109,7 @@
       ;; caller-supplied late callback must still observe completion.
       (run)
       (try
-        (.execute (:callback-executor srv) run)
+        (execute! (:callback-executor srv) run)
         (catch :default e
           (report-error srv e)
           (run))))
@@ -718,7 +732,7 @@
     (if-not tracked?
       (run)
       (try
-        (.execute executor run)
+        (execute! executor run)
         (catch :default e
           ;; A caller-supplied executor may have been shut down independently.
           ;; Report that ownership violation, but preserve the close/callback

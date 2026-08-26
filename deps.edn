@@ -1,20 +1,36 @@
 ;; jolt-tcp — a teensyp-compatible TCP server for jolt (Clojure on Chez Scheme).
 ;; No JVM, no NIO: a single jolt.net readiness reactor plus bounded handler and
 ;; callback executors. Mirrors the teensyp.* namespaces so teensyp handlers run
-;; unmodified. Run tests with the reviewed fork compiler.
+;; unmodified. Run tests with Jolt v0.7.27 or newer.
 {:paths ["src"]
 
  :deps {io.github.casselc/jolt-net
         {:git/url "https://github.com/casselc/jolt-net.git"
-         :git/sha "eabf9067f32d0f4c1673b5d84c24484943ea75c5"}}
+         :git/sha "10542fcac421ec1466b6db55fe702483f9c0c97e"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,
- ;; the installer needs the alias too: `joltc -A:test -m hegel.install`.
+ ;; the installer needs the alias too: `jolt -A:test -m hegel.install`.
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {io.github.chucklehead-dev/jolt-hegel
                                {:git/url "https://github.com/chucklehead-dev/jolt-hegel.git"
-                                :git/sha "4910faed4dc86ee54c6afc1a99dcb9a5bca6e840"}}
-                  :main-opts ["-m" "teensyp.server-test"]}}
+                                :git/sha "53631c81cd927175935037699ddf687d98a44d24"}}
+                  :main-opts ["-m" "teensyp.server-test"]}
+           ;; Checked-in mains keep each native source-mode claim explicit.
+           :windows-portable-test
+           {:extra-paths ["test"]
+            :main-opts ["-m" "teensyp.windows-portable-test"]}
+           :windows-buffer-property-test
+           {:extra-paths ["test"]
+            :extra-deps {io.github.chucklehead-dev/jolt-hegel
+                         {:git/url "https://github.com/chucklehead-dev/jolt-hegel.git"
+                          :git/sha "53631c81cd927175935037699ddf687d98a44d24"}}
+            :main-opts ["-m" "teensyp.windows-buffer-property-test"]}
+           :windows-arm64-preview
+           {:extra-paths ["test"]
+            :extra-deps {io.github.chucklehead-dev/jolt-hegel
+                         {:git/url "https://github.com/chucklehead-dev/jolt-hegel.git"
+                          :git/sha "53631c81cd927175935037699ddf687d98a44d24"}}
+            :main-opts ["-m" "teensyp.windows-arm64-preview"]}}
 
- :tasks {test "joltc -M:test"}}
+ :tasks {test "jolt -M:test"}}

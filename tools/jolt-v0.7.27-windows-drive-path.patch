@@ -1,0 +1,30 @@
+diff --git a/host/chez/java/io.ss b/host/chez/java/io.ss
+--- a/host/chez/java/io.ss
++++ b/host/chez/java/io.ss
+@@ -201,9 +201,25 @@
+ ;; A user-facing relative path resolves against user.dir — the user's cwd before
+ ;; the launcher cd'd to the jolt repo root — matching the JVM, where io/file is
+ ;; cwd-relative. (io/resource builds jfiles from the source roots directly, so it
+ ;; isn't routed through here.)
++(define (absolute-fs-path? p)
++  (and (> (string-length p) 0)
++       (or (char=? (string-ref p 0) #\/)
++           (and (eq? (sa-os-family) 'windows)
++                (or
++                  ;; Drive-absolute paths. C:foo remains drive-relative.
++                  (and (> (string-length p) 2)
++                       (char-alphabetic? (string-ref p 0))
++                       (char=? (string-ref p 1) #\:)
++                       (or (char=? (string-ref p 2) #\/)
++                           (char=? (string-ref p 2) #\\)))
++                  ;; UNC and device paths both begin with two backslashes.
++                  (and (> (string-length p) 1)
++                       (char=? (string-ref p 0) #\\)
++                       (char=? (string-ref p 1) #\\)))))))
++
+ (define (project-relative p)
+-  (if (or (= (string-length p) 0) (char=? (string-ref p 0) #\/))
++  (if (or (= (string-length p) 0) (absolute-fs-path? p))
+       p
+       (let ((base (jolt-user-dir)))
+         ;; "." adds nothing the OS won't do itself when it resolves a relative

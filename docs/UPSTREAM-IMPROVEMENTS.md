@@ -4,6 +4,24 @@ This document records changes to Jolt, `jolt.ffi`, and the Jolt runtime that
 would make jolt-tcp safer, smaller, or faster. It is a local planning document,
 not an upstream issue tracker.
 
+## Release refresh — 2026-08-25
+
+This document's v0.4.15 probes are historical evidence, not a current Jolt
+capability list. Official Jolt v0.7.27 now includes the fixes first requested
+here for real CPU counts and monotonic time, `System/arraycopy`, SIGPIPE-safe
+IPv4 sockets with peer information, variadic FFI, public fibers,
+thread-correct `jolt.ffi/errno`, exact-width integers, scoped allocation,
+declarative struct layouts, and struct-by-value calls. Use the released APIs
+instead of copying the manual workarounds below.
+
+jolt-net no longer depends on the proposal-only target descriptor or scoped
+byte-array pointer loan. It now derives its exact host tuple from released APIs
+and uses scoped scratch buffers with `read-into!`/sliced `write-array`, passing
+all 213 checks on stock v0.7.27. A future pointer loan is an optimization only.
+The concurrent-FFI stress history and the broader jolt-net lifecycle/capability
+design also remain separate review obligations; a nearby released API does not
+by itself close them.
+
 ## Verification baseline
 
 Revalidated 2026-07-23 against:
@@ -17,13 +35,14 @@ The vendored [`stdlib/jolt/ffi.clj`](../refs/jolt/stdlib/jolt/ffi.clj) remains a
 thin macro surface over host-provided primitives. Recheck every claim against
 the exact upstream SHA before removing a workaround.
 
-The reviewed Jolt proposal fork is now published only to `casselc/jolt` on
-`codex/upstream-improvements-6-8`; nothing has been pushed to the upstream
-project's origin and no pull request has been opened. Its network prerequisites
-include scoped byte-array ranges at `1c8fdb97`, Windows path correction at
-`358c42b7`, and the variadic FFI boundary at `ecf7728f`. The known-unsound
-runtime AOT prototype remains isolated on `research/aot-v5-prototype` at
-`21062d5b` and is not part of the proposal branch.
+The historical Jolt proposal fork remains published only to `casselc/jolt` on
+`codex/upstream-improvements-6-8`; current CI no longer selects it. Runtime
+lanes use official Jolt v0.7.27 source, including on Windows and Intel macOS
+where no release binary is available. Windows source mode applies the
+checked-in drive/UNC absolute-path host-I/O compatibility patch pending its
+upstream release. The known-unsound runtime AOT prototype
+remains isolated on `research/aot-v5-prototype` at `21062d5b` and is not part
+of the current runtime path.
 
 ## Implementation update — 2026-07-24
 
@@ -31,9 +50,11 @@ runtime AOT prototype remains isolated on `research/aot-v5-prototype` at
   byte-slice, poller, endpoint, and lifecycle APIs. It has no direct
   `jolt.ffi`, `pollfd`, `fcntl`, pipe-wake, errno, or native-layout code.
 - `deps.edn` pins `casselc/jolt-net` at
-  `eabf9067f32d0f4c1673b5d84c24484943ea75c5`. That revision passed the complete
-  Linux x86-64 and macOS arm64 runtime suites plus Linux, Darwin, and Windows
-  ABI probes with source-built Chez 10.4.1.
+  `10542fcac421ec1466b6db55fe702483f9c0c97e`. That reviewed topic commit runs on
+  released Jolt v0.7.27, preserves the variadic `fcntl` ABI, and has green
+  Linux/macOS runtime plus Linux/macOS/Windows ABI-probe jobs. It preserves a
+  fail-closed Windows readiness boundary and does not claim Windows TCP loopback
+  support.
 - The TCP layer retains only transport-neutral endpoint maps and the diagnostic
   descriptor. Stable ownership generation and stale-readiness rejection remain
   `jolt.net` invariants rather than being duplicated here.

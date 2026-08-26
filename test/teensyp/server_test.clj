@@ -2,7 +2,7 @@
   "Framework-less acceptance tests driven over real loopback TCP. Each scenario
   starts a server, drives it with the blocking client in teensyp.ffi-net, and
   asserts the bytes on the wire. `-main` exits non-zero if anything fails, so
-  `joltc -M:test` gates CI."
+  `jolt -M:test` gates the released-runtime migration."
   (:require [clojure.string :as str]
             [clojure.test]
             [teensyp.server :as tcp]
@@ -1196,7 +1196,7 @@
   ;; Generative layers. The pure buffer properties run under clojure.test (via
   ;; hegel.clojure-test/with); the TCP properties use hegel.core/run-test!
   ;; directly and count their own failures. Both fold into the same total so
-  ;; `joltc -M:test` stays the single gate.
+  ;; `jolt -M:test` stays the single released-runtime migration gate.
   (println "\n-- teensyp.buffer generative properties (jolt-hegel) --")
   (let [s (clojure.test/run-tests 'teensyp.client-test
                                   'teensyp.buffer-property-test)]
