@@ -251,6 +251,20 @@
       (check "and keeps serving" "OK\n" (probe))
       (finally (tcp/stop-server srv) (Thread/sleep 150)))))
 
+(defn- test-peer-disconnect-is-not-reported []
+  (let [errors (atom [])
+        srv {:opts {:error-logger #(swap! errors conj %)}}]
+    (@#'tcp/report-error
+     srv (ex-info "peer reset" {:jolt.net/kind :connection-reset}))
+    (@#'tcp/report-error
+     srv (ex-info "retired socket" {:err :teensyp.server/socket-closed}
+                       (ex-info "peer reset"
+                                {:jolt.net/kind :connection-reset})))
+    (check "peer disconnect is normal connection retirement" [] @errors)
+    (@#'tcp/report-error srv (ex-info "reactor bug" {:err ::reactor-bug}))
+    (check "non-peer reactor failures remain observable"
+           ["reactor bug"] (mapv ex-message @errors))))
+
 ;; A peer that half-closes its write side is still waiting for a response.
 ;; Regression test: EOF used to close the connection outright, discarding
 ;; whatever the handler was about to write — so a client that sent a request and
@@ -1171,6 +1185,7 @@
   (test-stream-lines)
   (test-concurrent)
   (test-reactor-survives-connection-error)
+  (test-peer-disconnect-is-not-reported)
   (test-half-close-still-answered)
   (test-half-close-during-handler)
   (test-stream-half-close)
