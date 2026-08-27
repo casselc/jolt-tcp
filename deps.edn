@@ -6,7 +6,7 @@
 
  :deps {io.github.casselc/jolt-net
         {:git/url "https://github.com/casselc/jolt-net.git"
-         :git/sha "10542fcac421ec1466b6db55fe702483f9c0c97e"}}
+         :git/sha "d9d304228205ab03b86b0edb781526cf6b7bf791"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,
@@ -16,6 +16,11 @@
                                {:git/url "https://github.com/chucklehead-dev/jolt-hegel.git"
                                 :git/sha "53631c81cd927175935037699ddf687d98a44d24"}}
                   :main-opts ["-m" "teensyp.server-test"]}
+           ;; Dependency-free real-loopback regression for the reactor's
+           ;; publication/drain/arm ordering.
+           :rearm-latency-test
+           {:extra-paths ["test"]
+            :main-opts ["-m" "teensyp.rearm-latency-main"]}
            ;; Checked-in mains keep each native source-mode claim explicit.
            :windows-portable-test
            {:extra-paths ["test"]

@@ -15,7 +15,8 @@
             ;; discovered by clojure.test/run-tests, the properties by run-properties!
             [teensyp.client-test]
             [teensyp.buffer-property-test]
-            [teensyp.server-property-test]))
+            [teensyp.server-property-test]
+            [teensyp.rearm-latency-test :as rearm]))
 
 (def ^:private failures (atom 0))
 
@@ -26,6 +27,14 @@
     (println "ok  " label)
     (do (swap! failures inc)
         (println "FAIL" label "\n   expected:" (pr-str expected) "\n   actual:  " (pr-str actual)))))
+
+(defn- test-reactor-rearm-latency []
+  (let [summary (rearm/run! check)]
+    (println (str "     " (:exchanges summary) " exchanges of "
+                  (:bytes-each summary) " bytes, "
+                  (:total-reads summary) " read cycles, median "
+                  (:median-ms summary) " ms, max "
+                  (:max-ms summary) " ms"))))
 
 (defn- utf8 [s] (.getBytes ^String s "UTF-8"))
 (defn- ->str [^bytes b] (when b (String. b "UTF-8")))
@@ -1192,6 +1201,7 @@
   (test-stop-quiesces-active-handler-before-close)
   (test-repeated-start-stop-is-complete-and-idempotent)
   (test-stop-timeout-is-bounded-and-recoverable)
+  (test-reactor-rearm-latency)
 
   ;; Generative layers. The pure buffer properties run under clojure.test (via
   ;; hegel.clojure-test/with); the TCP properties use hegel.core/run-test!
