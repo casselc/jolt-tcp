@@ -902,11 +902,24 @@
 (defn- default-error-logger [e]
   (binding [*out* *err*] (prn e)))
 
+(defn- peer-disconnect?
+  "True for native and wrapped failures caused by the remote peer abandoning a
+  connection. Browsers routinely do this when navigating or closing an
+  EventSource; it retires only that connection and is not a reactor fault."
+  [error]
+  (loop [error error]
+    (when error
+      (let [data (ex-data error)]
+        (or (= :connection-reset (:jolt.net/kind data))
+            (= ::socket-closed (:err data))
+            (recur (ex-cause error)))))))
+
 (defn- report-error
   "Report a reactor-side error without letting it escape. The reactor runs in a
   `future`, so an escaping exception would be swallowed with no diagnostic."
   [srv e]
-  (try ((:error-logger (:opts srv)) e) (catch :default _ nil)))
+  (when-not (peer-disconnect? e)
+    (try ((:error-logger (:opts srv)) e) (catch :default _ nil))))
 
 (defn- cleanup-call
   "Run one cleanup action without preventing the remaining resources from being
