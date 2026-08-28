@@ -1002,8 +1002,12 @@
 (defn- shutdown-and-await! [executor]
   (.shutdown executor)
   (loop []
-    (when-not (.isTerminated executor)
-      (Thread/yield)
+    ;; Jolt v0.7.28's awaitTermination is a condition wait: on a fiber it
+    ;; parks without consuming its carrier, and on a thread it blocks without
+    ;; spinning. Keep the existing unbounded completion contract by retrying a
+    ;; bounded wait rather than imposing a new shutdown timeout.
+    (when-not (.awaitTermination executor 1
+                                 java.util.concurrent.TimeUnit/SECONDS)
       (recur))))
 
 (defn- retire-registration!
