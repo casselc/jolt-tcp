@@ -49,7 +49,7 @@
 (defn- execute!
   "Submit through the portable Executor boundary.
 
-  Jolt v0.7.27's modeled ExecutorService can accept `execute` after shutdown
+  Jolt v0.7.28's modeled ExecutorService can accept `execute` after shutdown
   without throwing even though no worker can run the task. Detect that terminal
   state before admission so every caller retains its synchronous-rejection
   cleanup contract. Plain Executor implementations still delegate directly."

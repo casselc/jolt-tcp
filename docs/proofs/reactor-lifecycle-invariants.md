@@ -517,7 +517,7 @@ task-tracker-retention-nonvacuity.smt2   sat
 The runtime gate remains:
 
 ```sh
-joltc -M:test
+jolt -M:test
 ```
 
 ## Remaining semantic gaps

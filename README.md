@@ -193,18 +193,16 @@ delegate to the production `teensyp.client` surface.
   `jolt.net` includes reviewed W1/W2 blocking and non-blocking byte-I/O
   substrate, but neither gate is **socket-runtime support**: no TCP
   server/client loopback test is enabled until Windows readiness exists.
-  Both Windows source-mode lanes apply the checked-in, fail-closed v0.7.27
-  drive/UNC absolute-path compatibility patch; remove it when that host-I/O fix
-  is available in the minimum supported Jolt release. They also select an
-  absolute `JOLT_GITLIBS_DIR` so v0.7.27's native mkdir, subprocess clone, and
-  marker write operate on one cache tree.
+  Both Windows source-mode lanes use v0.7.28's released drive/UNC absolute-path
+  support and select an absolute `JOLT_GITLIBS_DIR` so native mkdir, subprocess
+  clone, and marker writes operate on one cache tree.
 - Windows aarch64 has a non-gating public-preview source-mode lane on
   `windows-11-vs2026-arm`. It builds native `tarm64nt` Chez 10.4.1 and runs the
   descriptor-independent `teensyp.buffer` property suite through the upstream
   Windows ARM64 libhegel asset. Because jolt-net's newly probed ARM64 facts have
   not yet been reviewed into a descriptor, this lane requires target selection
   to fail closed and does not load the client/server namespaces. It uses no
-  packaged joltc, devboot, or AOT cache.
+  packaged runtime, devboot, or AOT cache.
 
 ## Testing
 
@@ -213,7 +211,7 @@ jolt -A:test -m hegel.install
 JOLT_HEGEL_REQUIRED=1 jolt -M:test
 ```
 
-The normal dependency graph pins the reviewed stock-v0.7.27-compatible
+The normal dependency graph pins the reviewed stock-v0.7.28-compatible
 `jolt-net` topic commit. Required Hegel mode prevents a missing native library
 from silently skipping the property layers.
 

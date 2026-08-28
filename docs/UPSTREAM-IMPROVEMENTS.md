@@ -4,20 +4,20 @@ This document records changes to Jolt, `jolt.ffi`, and the Jolt runtime that
 would make jolt-tcp safer, smaller, or faster. It is a local planning document,
 not an upstream issue tracker.
 
-## Release refresh — 2026-08-25
+## Release refresh — 2026-08-28
 
 This document's v0.4.15 probes are historical evidence, not a current Jolt
-capability list. Official Jolt v0.7.27 now includes the fixes first requested
+capability list. Official Jolt v0.7.28 now includes the fixes first requested
 here for real CPU counts and monotonic time, `System/arraycopy`, SIGPIPE-safe
 IPv4 sockets with peer information, variadic FFI, public fibers,
-thread-correct `jolt.ffi/errno`, exact-width integers, scoped allocation,
+atomic native-error capture, exact-width integers, scoped allocation,
 declarative struct layouts, and struct-by-value calls. Use the released APIs
 instead of copying the manual workarounds below.
 
 jolt-net no longer depends on the proposal-only target descriptor or scoped
 byte-array pointer loan. It now derives its exact host tuple from released APIs
 and uses scoped scratch buffers with `read-into!`/sliced `write-array`, passing
-all 213 checks on stock v0.7.27. A future pointer loan is an optimization only.
+all 212 checks on stock v0.7.28. A future pointer loan is an optimization only.
 The concurrent-FFI stress history and the broader jolt-net lifecycle/capability
 design also remain separate review obligations; a nearby released API does not
 by itself close them.
@@ -26,7 +26,7 @@ by itself close them.
 
 Revalidated 2026-07-23 against:
 
-- installed `joltc v0.4.15`;
+- an historical Jolt v0.4.15 compiler binary;
 - the Jolt checkout in [`refs/jolt`](../refs/jolt), commit
   `d5aaf503fc7a45c5638d21215eb153b426a7e8dc`; and
 - the current local jolt-tcp source.
@@ -37,12 +37,11 @@ the exact upstream SHA before removing a workaround.
 
 The historical Jolt proposal fork remains published only to `casselc/jolt` on
 `codex/upstream-improvements-6-8`; current CI no longer selects it. Runtime
-lanes use official Jolt v0.7.27 source, including on Windows and Intel macOS
-where no release binary is available. Windows source mode applies the
-checked-in drive/UNC absolute-path host-I/O compatibility patch pending its
-upstream release. The known-unsound runtime AOT prototype
-remains isolated on `research/aot-v5-prototype` at `21062d5b` and is not part
-of the current runtime path.
+lanes use official Jolt v0.7.28 source, including on Windows and Intel macOS
+where no release binary is available. Released drive/UNC absolute-path support
+removes the former local host-I/O compatibility patch. The known-unsound
+runtime AOT prototype remains isolated on `research/aot-v5-prototype` at
+`21062d5b` and is not part of the current runtime path.
 
 ## Implementation update — 2026-07-24
 
@@ -50,8 +49,9 @@ of the current runtime path.
   byte-slice, poller, endpoint, and lifecycle APIs. It has no direct
   `jolt.ffi`, `pollfd`, `fcntl`, pipe-wake, errno, or native-layout code.
 - `deps.edn` pins `casselc/jolt-net` at
-  `10542fcac421ec1466b6db55fe702483f9c0c97e`. That reviewed topic commit runs on
-  released Jolt v0.7.27, preserves the variadic `fcntl` ABI, and has green
+  `f2ea68d9adc5a6d7b66cb511351e98e93081aee2`. That reviewed topic commit runs on
+  released Jolt v0.7.28, captures native failures atomically, preserves the
+  variadic `fcntl` ABI, and has green
   Linux/macOS runtime plus Linux/macOS/Windows ABI-probe jobs. It preserves a
   fail-closed Windows readiness boundary and does not claim Windows TCP loopback
   support.

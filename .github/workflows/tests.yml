@@ -90,11 +90,11 @@ jobs:
       # Run the exact minimum released source claimed by deps.edn. The source
       # checkout keeps Intel macOS covered even though no release binary is
       # published for that runner architecture.
-      - name: Checkout official Jolt v0.7.27
+      - name: Checkout official Jolt v0.7.28
         uses: actions/checkout@v4
         with:
           repository: jolt-lang/jolt
-          ref: v0.7.27
+          ref: v0.7.28
           submodules: recursive
           path: jolt
 
@@ -201,22 +201,13 @@ jobs:
           "$bindir/chez" --version | tee "$RUNNER_TEMP/chez-version"
           grep -Fq '10.4.1' "$RUNNER_TEMP/chez-version"
 
-      - name: Checkout official Jolt v0.7.27
+      - name: Checkout official Jolt v0.7.28
         uses: actions/checkout@v4
         with:
           repository: jolt-lang/jolt
-          ref: v0.7.27
+          ref: v0.7.28
           submodules: recursive
           path: jolt
-
-      - name: Apply v0.7.27 Windows drive-path compatibility patch
-        shell: pwsh
-        working-directory: jolt
-        run: |
-          git apply --check `
-            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
-          git apply `
-            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
 
       - name: Run dependency-free portable TCP contracts
         shell: powershell
@@ -248,7 +239,7 @@ jobs:
 # teensyp.client/server would correctly fail before any socket call. This
 # public-preview lane still proves that native source-mode Jolt and libhegel can
 # exercise the descriptor-independent production buffer layer. It then checks
-# the dependency's unsupported target boundary explicitly. No packaged joltc,
+# the dependency's unsupported target boundary explicitly. No packaged runtime,
 # devboot, AOT cache, emulated x64 Chez, or socket-runtime claim is involved.
   windows-arm64-source-preview:
     name: source-mode buffer preview (Windows aarch64; non-AOT, no sockets)
@@ -277,22 +268,13 @@ jobs:
           cd /d "%GITHUB_WORKSPACE%\chez-arm64"
           call build.bat tarm64nt /only
 
-      - name: Checkout official Jolt v0.7.27
+      - name: Checkout official Jolt v0.7.28
         uses: actions/checkout@v4
         with:
           repository: jolt-lang/jolt
-          ref: v0.7.27
+          ref: v0.7.28
           submodules: recursive
           path: jolt
-
-      - name: Apply v0.7.27 Windows drive-path compatibility patch
-        shell: pwsh
-        working-directory: jolt
-        run: |
-          git apply --check `
-            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
-          git apply `
-            "$env:GITHUB_WORKSPACE\tools\jolt-v0.7.27-windows-drive-path.patch"
 
       - name: Assert native Chez for source-mode Jolt
         shell: pwsh

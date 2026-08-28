@@ -1,12 +1,12 @@
 ;; jolt-tcp — a teensyp-compatible TCP server for jolt (Clojure on Chez Scheme).
 ;; No JVM, no NIO: a single jolt.net readiness reactor plus bounded handler and
 ;; callback executors. Mirrors the teensyp.* namespaces so teensyp handlers run
-;; unmodified. Run tests with Jolt v0.7.27 or newer.
+;; unmodified. Run tests with Jolt v0.7.28 or newer.
 {:paths ["src"]
 
  :deps {io.github.casselc/jolt-net
         {:git/url "https://github.com/casselc/jolt-net.git"
-         :git/sha "10542fcac421ec1466b6db55fe702483f9c0c97e"}}
+         :git/sha "f2ea68d9adc5a6d7b66cb511351e98e93081aee2"}}
 
  ;; jolt-hegel is test-time only (property/stateful generation via libhegel), so
  ;; it lives in :extra-deps rather than :deps. Because the dep is alias-scoped,
