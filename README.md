@@ -211,9 +211,9 @@ jolt -A:test -m hegel.install
 JOLT_HEGEL_REQUIRED=1 jolt -M:test
 ```
 
-The normal dependency graph pins the reviewed stock-v0.7.28-compatible
-`jolt-net` topic commit. Required Hegel mode prevents a missing native library
-from silently skipping the property layers.
+The normal dependency graph pins the reviewed Jolt 0.8-compatible `jolt-net`
+commit. Required Hegel mode prevents a missing native library from silently
+skipping the property layers.
 
 Three layers, all gated by the single `-M:test` command, which exits
 non-zero on any failure.
