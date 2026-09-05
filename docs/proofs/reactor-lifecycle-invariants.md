@@ -24,7 +24,7 @@ owned `jolt.net` socket. `:fd` is diagnostic data only.
 
 - `src/teensyp/server.clj:143-145`: pending work carries the generation copied
   from the `jolt.net` registration token, never an fd.
-- `src/teensyp/server.clj:699-702`: `current-context?` requires that the
+- `src/teensyp/server.clj:739-742`: `current-context?` requires that the
   registry still contains the identical `Context`.
 - `src/teensyp/server.clj:785-869`: a context is built from the owned socket and
   token returned by `net/register!`; complete metadata precedes registry/handler
@@ -90,10 +90,10 @@ wait, or a stop-between-publication-and-submission trace without the reservation
 
 ### Source facts
 
-- `src/teensyp/server.clj:486-489`: every admitted task's `finally` calls
+- `src/teensyp/server.clj:510-513`: every admitted task's `finally` calls
   `finish-work!`, which clears `WORKING`, republishes the context, and wakes the
   reactor.
-- `src/teensyp/server.clj:491-517`: `submit-marked-handler!` owns executor
+- `src/teensyp/server.clj:515-541`: `submit-marked-handler!` owns executor
   admission and rejection cleanup; `submit-handler!` first publishes `WORKING`
   for ordinary read dispatch. The success path wraps the handler in that
   `finally`; synchronous rejection reports the error, requests close, calls
@@ -145,15 +145,15 @@ task, or a non-empty active set after every pre-freeze task completed.
 
 ### Source facts
 
-- `src/teensyp/server.clj:51-70`: a tracker contains only `:accepting?` and the
+- `src/teensyp/server.clj:65-84`: a tracker contains only `:accepting?` and the
   current `:active` set. Registration uses one CAS and rejects a closed tracker;
   completion removes exactly its own promise with `disj`.
-- `src/teensyp/server.clj:72-105` and `704-733`: callback and handler-close
+- `src/teensyp/server.clj:86-116` and `744-768`: callback and handler-close
   submissions add a fresh completion promise before executor admission and
   remove it in `finally`, including the synchronous rejection fallback.
-- `src/teensyp/server.clj:903-915`: cleanup closes admission before reading and
+- `src/teensyp/server.clj:957-966`: cleanup closes admission before reading and
   awaiting the active set, and repeats until that set is empty.
-- `src/teensyp/server.clj:1001-1030`: all close/callback producers are submitted
+- `src/teensyp/server.clj:1059-1087`: all close/callback producers are submitted
   before the two trackers are frozen and awaited.
 
 ### Checked models
@@ -502,14 +502,14 @@ not claimed.
   `:active 0`.
 - `src/teensyp/server.clj:359-372` holds that admission across the control
   queue CAS, pending publication, and wake, then releases in `finally`.
-- `src/teensyp/server.clj:571-587` closes admission before publishing
+- `src/teensyp/server.clj:573-589` closes admission before publishing
   `CLOSED`.
-- `src/teensyp/server.clj:615-629` drains pre-close controls without scheduling
+- `src/teensyp/server.clj:617-631` drains pre-close controls without scheduling
   resumed reads and submits their callbacks in queue order.
-- `src/teensyp/server.clj:772-813` selects either closed or ordinary handling
+- `src/teensyp/server.clj:774-816` selects either closed or ordinary handling
   on the single reactor thread. Both consumers use the same destructive
   `q-poll!`, so they cannot double-submit an entry.
-- `src/teensyp/server.clj:1057-1079` applies the same admission close and
+- `src/teensyp/server.clj:1059-1082` applies the same admission close and
   control drain to every remaining Context during full-server shutdown before
   registration and socket retirement.
 

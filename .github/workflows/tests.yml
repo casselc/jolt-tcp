@@ -98,18 +98,18 @@ jobs:
           submodules: recursive
           path: jolt
 
-      # libhegel 0.33.0 has no Darwin/x86_64 release asset. Build the exact
+      # Build the exact libhegel version required by the pinned binding from
       # tagged source so Intel macOS still runs the complete property suite.
       - name: Checkout pinned libhegel source (macOS x86_64)
         if: runner.os == 'macOS' && runner.arch == 'X64'
         uses: actions/checkout@v4
         with:
           repository: hegeldev/hegel-rust
-          ref: e5fcdb10d422ceadb635991353b1c9b20ee4a697
+          ref: 94edce76aaac1e96e3d93916475d9b2fa3ee97f0
           persist-credentials: false
           path: hegel-rust
 
-      - name: Build pinned libhegel 0.33.0 (macOS x86_64)
+      - name: Build pinned libhegel 0.33.3 (macOS x86_64)
         if: runner.os == 'macOS' && runner.arch == 'X64'
         working-directory: hegel-rust
         shell: bash
@@ -201,11 +201,13 @@ jobs:
           "$bindir/chez" --version | tee "$RUNNER_TEMP/chez-version"
           grep -Fq '10.4.1' "$RUNNER_TEMP/chez-version"
 
-      - name: Checkout official Jolt v0.8.1
+      # POSIX lanes above retain released Jolt v0.8.1. Windows temporarily
+      # exercises the reviewed path fix proposed in jolt-lang/jolt#710.
+      - name: Checkout reviewed Jolt Windows path candidate
         uses: actions/checkout@v4
         with:
-          repository: jolt-lang/jolt
-          ref: v0.8.1
+          repository: casselc/jolt
+          ref: f7f5dd31251e0b04dc4f8f377a7779f89b932379
           submodules: recursive
           path: jolt
 
@@ -268,11 +270,13 @@ jobs:
           cd /d "%GITHUB_WORKSPACE%\chez-arm64"
           call build.bat tarm64nt /only
 
-      - name: Checkout official Jolt v0.8.1
+      # POSIX lanes retain released Jolt v0.8.1. Windows temporarily exercises
+      # the reviewed path fix proposed in jolt-lang/jolt#710.
+      - name: Checkout reviewed Jolt Windows path candidate
         uses: actions/checkout@v4
         with:
-          repository: jolt-lang/jolt
-          ref: v0.8.1
+          repository: casselc/jolt
+          ref: f7f5dd31251e0b04dc4f8f377a7779f89b932379
           submodules: recursive
           path: jolt
 
