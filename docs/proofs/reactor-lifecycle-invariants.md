@@ -474,10 +474,80 @@ Models:
 - [`flag-lock-current.pl`](models/flag-lock-current.pl)
 - [`flag-lock-faulty-control.pl`](models/flag-lock-faulty-control.pl)
 
+## 7. Socket close gives controls one terminal outcome
+
+### Bounded claim
+
+For three callback-bearing control attempts, each operation has exactly one
+terminal outcome:
+
+1. a control that loses the close-admission CAS is rejected synchronously,
+   without enqueue or callback submission;
+2. a control that wins admission but loses the bounded queue CAS is rejected
+   synchronously, releases admission, and has no callback submission; or
+3. a published control is removed by either ordinary reactor handling or the
+   closed-path drain and its callback is submitted exactly once.
+
+When close occurs, it waits for every pre-close admission to release before the
+stable barrier. No gated producer can enqueue after that boundary. Callback
+submission follows the control queue's CAS order; executor completion order is
+not claimed.
+
+### Source facts
+
+- `src/teensyp/server.clj:141-152` makes queue insertion and removal individual
+  CAS operations over one persistent FIFO queue.
+- `src/teensyp/server.clj:265-303` admits only while the shared phase is
+  `:open`, releases through a CAS decrement, and makes close wait for
+  `:active 0`.
+- `src/teensyp/server.clj:359-372` holds that admission across the control
+  queue CAS, pending publication, and wake, then releases in `finally`.
+- `src/teensyp/server.clj:571-587` closes admission before publishing
+  `CLOSED`.
+- `src/teensyp/server.clj:615-629` drains pre-close controls without scheduling
+  resumed reads and submits their callbacks in queue order.
+- `src/teensyp/server.clj:772-813` selects either closed or ordinary handling
+  on the single reactor thread. Both consumers use the same destructive
+  `q-poll!`, so they cannot double-submit an entry.
+- `src/teensyp/server.clj:1057-1079` applies the same admission close and
+  control drain to every remaining Context during full-server shutdown before
+  registration and socket retirement.
+
+The shared transition system is
+[`control-close-admission.smt2`](models/control-close-admission.smt2). Each
+row below appends the linked scenario assertions to that same model and
+violation predicate:
+
+| Scenario | Expected | Result | Evidence |
+|---|---:|---:|---|
+| [historical faults](models/control-close-admission-buggy.smt2) | SAT | **SAT** | controls bypass close admission, enqueue after retirement, and receive zero submissions |
+| [FIFO fault](models/control-close-admission-fifo-buggy.smt2) | SAT | **SAT** | a hypothetical tail-first poll reverses two independent poll ranks and trips the shared FIFO violation |
+| [corrected counterexample query](models/control-close-admission-corrected.smt2) | UNSAT | **UNSAT** | shared gate, stable barrier, ordinary/closed consumers, queue-full outcome, and the asserted violation are in the unsat core |
+| [close-boundary witness](models/control-close-admission-nonvacuity.smt2) | SAT | **SAT** | two producers cross the close CAS and enqueue in reverse acquisition order; both drain FIFO, while a post-barrier attempt is rejected |
+| [ordinary/capacity witness](models/control-close-admission-ordinary-nonvacuity.smt2) | SAT | **SAT** | an open socket submits two ordinary callbacks once and rejects one queue-full attempt without publication |
+| [server-shutdown witness](models/control-close-admission-shutdown-nonvacuity.smt2) | SAT | **SAT** | shutdown waits for one crossing producer, drains it before Context retirement, rejects a post-barrier attempt, and releases a queue-full admission |
+
+The executable companions are
+`test-control-after-close-is-rejected` and
+`test-control-admitted-before-close-is-settled`, plus the equivalent
+`test-control-admitted-before-server-stop-is-settled`, in
+`test/teensyp/server_test.clj`. On the exact stock base
+`85f67fb76c4c6d392f5dd51821e458d446ebae01`, a test-only patch reports four
+failures: late control is accepted, close observes `:active 0` while the
+control producer is held before its queue CAS, the callback is lost, and close
+runs alone. The candidate implementation passes all nine focused assertions,
+including `{:phase :closed :active 1}` at the crossing barrier and exactly one
+control callback before the close callback on a single-thread callback
+executor. The server-shutdown companion adds four equivalent stock-base
+failures and passes all eight candidate assertions, for an aggregate
+eight-failure/17-pass negative-positive gate.
+
 ## Reproduction record
 
-The new SMT files contain no `(check-sat)`, `(get-model)`, or solver-specific
-epilogue. For each file, the exact tool invocation was:
+The SMT files contain no `(check-sat)`, `(get-model)`, or solver-specific
+epilogue. Existing standalone files are submitted verbatim. For the four
+control-close rows, concatenate `control-close-admission.smt2` and the named
+scenario file, then use that exact combined input:
 
 ```text
 mcp__chiasmus.chiasmus_lint(
@@ -486,7 +556,8 @@ mcp__chiasmus.chiasmus_verify(
   solver="z3", input=<verbatim contents of the listed model file>)
 ```
 
-All 22 SMT files returned `fixes=[]` and `errors=[]` from `chiasmus_lint`.
+All 28 solver inputs returned `fixes=[]` and `errors=[]` from
+`chiasmus_lint`.
 `chiasmus_verify` returned:
 
 ```text
@@ -512,6 +583,12 @@ stop-admission-inflight-buggy.smt2       sat
 task-tracker-retention-buggy.smt2        sat
 task-tracker-retention-corrected.smt2    unsat
 task-tracker-retention-nonvacuity.smt2   sat
+control-close-admission + buggy          sat
+control-close-admission + fifo-buggy     sat
+control-close-admission + corrected      unsat
+control-close-admission + nonvacuity     sat
+control-close-admission + ordinary-nonvacuity sat
+control-close-admission + shutdown-nonvacuity sat
 ```
 
 The runtime gate remains:
@@ -545,3 +622,7 @@ jolt -M:test
 - The lock model is a source-derived call graph. It proves absence of the old
   recursive acquisition path, not fairness of the runtime's lock/atom
   implementations.
+- The control-close model bounds attempts to three, assumes successful
+  pending/wake/callback submission after a successful queue CAS and bounded
+  reactor progress to the applicable consumer, and proves callback submission
+  rather than executor scheduling or completion.

@@ -164,6 +164,186 @@
         (check "greet then EOF" "bye\n" (recv-until-eof fd))
         (net/close! fd)))))
 
+(defn- test-control-after-close-is-rejected []
+  (let [socket (promise)
+        closed (promise)
+        control-callback (promise)
+        handler (fn
+                  ([sock]
+                   (deliver socket sock)
+                   (tcp/close sock #(deliver closed :closed))
+                   nil)
+                  ([state _sock _buffer] state)
+                  ([_state _error] nil))]
+    (with-server handler
+      (fn [port]
+        (let [fd (net/connect-loopback port)]
+          (try
+            (recv-until-eof fd)
+            (check "socket close callback precedes the late-control probe"
+                   :closed (deref closed 2000 :timeout))
+            (let [error (try
+                          (tcp/pause-reads
+                           (deref socket 0 nil)
+                           #(deliver control-callback :called))
+                          nil
+                          (catch :default error error))]
+              (check "control admission on a closed socket fails synchronously"
+                     ::tcp/socket-closed (:err (ex-data error)))
+              (check "a rejected late control cannot orphan its callback"
+                     :not-called
+                     (deref control-callback 50 :not-called)))
+            (finally
+              (net/close! fd))))))))
+
+(defn- test-control-admitted-before-close-is-settled []
+  (let [socket (promise)
+        at-queue-cas (promise)
+        release-queue-cas (promise)
+        control-count (atom 0)
+        close-count (atom 0)
+        callbacks (atom [])
+        callbacks-done (promise)
+        intercepted? (atom false)
+        callback-ex (java.util.concurrent.Executors/newSingleThreadExecutor)
+        handler (fn
+                  ([sock] (deliver socket sock) nil)
+                  ([state _sock _buffer] state)
+                  ([_state _error] nil))
+        srv (tcp/run-server :port 0 :handler handler :reuse-address? true
+                            :callback-executor callback-ex
+                            :shutdown-callback-executor? true)
+        client (net/connect-loopback (:port srv))
+        original-q-offer! @#'tcp/q-offer!]
+    (try
+      (let [sock (deref socket 2000 nil)]
+        (with-redefs-fn
+          {#'tcp/q-offer!
+           (fn [queue cap entry]
+             ;; Pause exactly one control producer after admission but before
+             ;; its queue CAS. This is the crossing trace from the bounded
+             ;; model: close may publish :closed, but its active=0 barrier may
+             ;; not return until this producer publishes and releases.
+             (when (and (= 2 (count entry))
+                        (= ::tcp/pause-reads (first entry))
+                        (compare-and-set! intercepted? false true))
+               (deliver at-queue-cas true)
+               (deref release-queue-cas))
+             (original-q-offer! queue cap entry))}
+          (fn []
+            (let [control-call
+                  (future
+                    (tcp/pause-reads
+                     sock
+                     #(do (swap! control-count inc)
+                           (swap! callbacks conj :control)
+                           (when (= 2 (count @callbacks))
+                             (deliver callbacks-done true)))))]
+              (check "control producer reaches its queue CAS while admitted"
+                     true (deref at-queue-cas 2000 false))
+              (tcp/close
+               sock
+               #(do (swap! close-count inc)
+                     (swap! callbacks conj :close)
+                     (when (= 2 (count @callbacks))
+                       (deliver callbacks-done true))))
+              (let [at-barrier
+                    (loop [n 0]
+                      (let [admission @(:write-admission sock)]
+                        (if (or (= :closed (:phase admission)) (>= n 100000))
+                          admission
+                          (do (Thread/yield) (recur (inc n))))))]
+                (check "close waits at the stable-empty barrier for the admitted control"
+                       {:phase :closed :active 1} at-barrier)
+                (check "admitted control has not returned before its queue CAS"
+                       :waiting (deref control-call 0 :waiting)))
+              (deliver release-queue-cas :go)
+              (check "pre-close admitted control returns after publishing"
+                     nil (deref control-call 2000 :timeout))
+              (recv-until-eof client)
+              (check "admitted control and close callbacks both complete"
+                     true (deref callbacks-done 2000 false))
+              (check "closed-path drain submits each callback once and control first"
+                     [[1 1] [:control :close]]
+                     [[@control-count @close-count] @callbacks])))))
+      (finally
+        (deliver release-queue-cas :go)
+        (net/close! client)
+        (when @(:running? srv)
+          (try (tcp/stop-server srv) (catch :default _ nil)))))))
+
+(defn- test-control-admitted-before-server-stop-is-settled []
+  (let [socket (promise)
+        at-queue-cas (promise)
+        release-queue-cas (promise)
+        callback-count (atom 0)
+        callback-done (promise)
+        rejected-callback (promise)
+        intercepted? (atom false)
+        handler (fn
+                  ([sock] (deliver socket sock) nil)
+                  ([state _sock _buffer] state)
+                  ([_state _error] nil))
+        srv (tcp/run-server :port 0 :handler handler :reuse-address? true
+                            :stop-timeout-ms 3000)
+        client (net/connect-loopback (:port srv))
+        original-q-offer! @#'tcp/q-offer!]
+    (try
+      (let [sock (deref socket 2000 nil)]
+        (with-redefs-fn
+          {#'tcp/q-offer!
+           (fn [queue cap entry]
+             (when (and (= 2 (count entry))
+                        (= ::tcp/pause-reads (first entry))
+                        (compare-and-set! intercepted? false true))
+               (deliver at-queue-cas true)
+               (deref release-queue-cas))
+             (original-q-offer! queue cap entry))}
+          (fn []
+            (let [control-call
+                  (future
+                    (tcp/pause-reads
+                     sock
+                     #(do (swap! callback-count inc)
+                           (deliver callback-done :called))))]
+              (check "control producer reaches its queue CAS before server stop"
+                     true (deref at-queue-cas 2000 false))
+              (let [stopping (future (tcp/stop-server srv) :stopped)
+                    at-barrier
+                    (loop [n 0]
+                      (let [admission @(:write-admission sock)]
+                        (if (or (= :closed (:phase admission)) (>= n 100000))
+                          admission
+                          (do (Thread/yield) (recur (inc n))))))]
+                (check "server stop waits for the admitted control producer"
+                       [{:phase :closed :active 1} :waiting]
+                       [at-barrier (deref stopping 0 :waiting)])
+                (deliver release-queue-cas :go)
+                (check "server-stop control returns after queue publication"
+                       nil (deref control-call 2000 :timeout))
+                (check "server stop submits the admitted control callback"
+                       :called (deref callback-done 2000 :timeout))
+                (check "server stop completes after the control callback"
+                       :stopped (deref stopping 2000 :timeout))
+                (check "server-stop control callback is submitted once"
+                       1 @callback-count)
+                (let [error
+                      (try
+                        (tcp/resume-reads
+                         sock #(deliver rejected-callback :called))
+                        nil
+                        (catch :default error error))]
+                  (check "control after server stop is rejected synchronously"
+                         ::tcp/socket-closed (:err (ex-data error)))
+                  (check "control rejected after server stop has no callback"
+                         :not-called
+                         (deref rejected-callback 50 :not-called))))))))
+      (finally
+        (deliver release-queue-cas :go)
+        (net/close! client)
+        (when @(:running? srv)
+          (try (tcp/stop-server srv) (catch :default _ nil)))))))
+
 (defn- test-callback-chain []
   (with-server callback-chain-handler
     (fn [port]
@@ -1180,6 +1360,9 @@
   (test-line-reverse-partial)
   (test-doubler)
   (test-write-then-close)
+  (test-control-after-close-is-rejected)
+  (test-control-admitted-before-close-is-settled)
+  (test-control-admitted-before-server-stop-is-settled)
   (test-callback-chain)
   (test-pause-resume)
   (test-stream-lines)
