@@ -1,0 +1,22 @@
+; Full-server-shutdown witness for the corrected implementation.
+; Concatenate after control-close-admission.smt2. cleanup-server! uses the same
+; per-Context admission barrier and closed drain before retirement.
+(assert (! gate_enabled :named shared_control_admission_gate))
+(assert (! closed_drain_enabled :named shutdown_drains_controls))
+(assert (! fifo_queue_enabled :named fifo_queue_head_poll))
+(assert (! close_occurs :named shutdown_closes_context_fixture))
+(assert (! (= close_cas_step 2) :named shutdown_close_cas_fixture))
+(assert (! (= close_barrier_step 6) :named shutdown_barrier_fixture))
+(assert (! (= closed_drain_step 7) :named shutdown_drain_fixture))
+(assert (! (= (select attempt_step 0) 0) :named crossing_attempt_fixture))
+(assert (! (select queue_capacity 0) :named crossing_capacity_fixture))
+(assert (! (= (select enqueue_step 0) 3) :named crossing_enqueue_fixture))
+(assert (! (= (select release_step 0) 4) :named crossing_release_fixture))
+(assert (! (not (select ordinary_choice 0)) :named crossing_waits_for_shutdown_drain))
+(assert (! (= (select poll_step 0) 8) :named shutdown_poll_fixture))
+(assert (! (= (select attempt_step 1) 9) :named post_shutdown_attempt_fixture))
+(assert (! (select queue_capacity 1) :named rejected_capacity_irrelevant))
+(assert (! (= (select attempt_step 2) 1) :named capacity_attempt_fixture))
+(assert (! (not (select queue_capacity 2)) :named queue_full_fixture))
+(assert (! (= (select release_step 2) 5) :named capacity_release_fixture))
+(assert (! (not violation) :named nonviolating_shutdown_trace))

@@ -1,0 +1,225 @@
+; Shared bounded transition system for socket-control admission and completion.
+;
+; Bound: controls 0..2, an optional close, at most one ordinary dequeue and one
+; closed-path dequeue per control. Steps are linearization ranks, not time.
+; Queue-capacity results and ordinary-service scheduling are explicit inputs.
+; q-offer!, mark-pending!, wake-server!, and submit-callback are otherwise total.
+; submitted_count means callback submission, not executor completion order.
+; The bounded trace assumes the single reactor reaches the applicable ordinary
+; or closed consumer; it does not prove scheduler liveness.
+(declare-const close_occurs Bool)
+(declare-const gate_enabled Bool)
+(declare-const closed_drain_enabled Bool)
+(declare-const fifo_queue_enabled Bool)
+(declare-const close_cas_step Int)
+(declare-const close_barrier_step Int)
+(declare-const closed_drain_step Int)
+
+(declare-const attempt_step (Array Int Int))
+(declare-const queue_capacity (Array Int Bool))
+(declare-const enqueue_step (Array Int Int))
+(declare-const release_step (Array Int Int))
+(declare-const ordinary_choice (Array Int Bool))
+(declare-const admitted (Array Int Bool))
+(declare-const closed_rejected (Array Int Bool))
+(declare-const capacity_rejected (Array Int Bool))
+(declare-const published (Array Int Bool))
+(declare-const ordinary_consumed (Array Int Bool))
+(declare-const closed_consumed (Array Int Bool))
+(declare-const submitted_count (Array Int Int))
+(declare-const poll_step (Array Int Int))
+(declare-const submit_step (Array Int Int))
+(declare-const violation Bool)
+
+(assert (!
+  (ite close_occurs
+       (and (<= 0 close_cas_step)
+            (< close_cas_step close_barrier_step)
+            (< close_barrier_step closed_drain_step))
+       (and (= close_cas_step (- 1))
+            (= close_barrier_step (- 1))
+            (= closed_drain_step (- 1))))
+  :named close_lifecycle))
+
+(assert (!
+  (and
+    (and
+      (<= 0 (select attempt_step 0))
+      (= (select admitted 0) (or (not gate_enabled) (not close_occurs)
+                                 (< (select attempt_step 0) close_cas_step)))
+      (= (select closed_rejected 0) (not (select admitted 0)))
+      (= (select capacity_rejected 0)
+         (and (select admitted 0) (not (select queue_capacity 0))))
+      (= (select published 0) (and (select admitted 0) (select queue_capacity 0)))
+      (= (= (select release_step 0) (- 1)) (not (select admitted 0)))
+      (=> (select admitted 0) (> (select release_step 0) (select attempt_step 0)))
+      (= (= (select enqueue_step 0) (- 1)) (not (select published 0)))
+      (=> (select published 0)
+          (and (> (select enqueue_step 0) (select attempt_step 0))
+               (< (select enqueue_step 0) (select release_step 0))))
+      (= (select ordinary_consumed 0)
+         (and (select published 0)
+              (or (not close_occurs)
+                  (and (< (select enqueue_step 0) close_barrier_step)
+                       (select ordinary_choice 0)))))
+      (= (select closed_consumed 0)
+         (and (select published 0) close_occurs
+              (not (select ordinary_consumed 0)) closed_drain_enabled
+              (< (select enqueue_step 0) closed_drain_step)))
+      (= (select submitted_count 0)
+         (+ (ite (select ordinary_consumed 0) 1 0)
+            (ite (select closed_consumed 0) 1 0)))
+      (= (= (select poll_step 0) (- 1)) (not (= (select submitted_count 0) 1)))
+      (=> (= (select submitted_count 0) 1)
+          (> (select poll_step 0) (select enqueue_step 0)))
+      (= (select submit_step 0)
+         (ite (= (select submitted_count 0) 1)
+              (+ 1 (select poll_step 0)) (- 1))))
+    (and
+      (<= 0 (select attempt_step 1))
+      (= (select admitted 1) (or (not gate_enabled) (not close_occurs)
+                                 (< (select attempt_step 1) close_cas_step)))
+      (= (select closed_rejected 1) (not (select admitted 1)))
+      (= (select capacity_rejected 1)
+         (and (select admitted 1) (not (select queue_capacity 1))))
+      (= (select published 1) (and (select admitted 1) (select queue_capacity 1)))
+      (= (= (select release_step 1) (- 1)) (not (select admitted 1)))
+      (=> (select admitted 1) (> (select release_step 1) (select attempt_step 1)))
+      (= (= (select enqueue_step 1) (- 1)) (not (select published 1)))
+      (=> (select published 1)
+          (and (> (select enqueue_step 1) (select attempt_step 1))
+               (< (select enqueue_step 1) (select release_step 1))))
+      (= (select ordinary_consumed 1)
+         (and (select published 1)
+              (or (not close_occurs)
+                  (and (< (select enqueue_step 1) close_barrier_step)
+                       (select ordinary_choice 1)))))
+      (= (select closed_consumed 1)
+         (and (select published 1) close_occurs
+              (not (select ordinary_consumed 1)) closed_drain_enabled
+              (< (select enqueue_step 1) closed_drain_step)))
+      (= (select submitted_count 1)
+         (+ (ite (select ordinary_consumed 1) 1 0)
+            (ite (select closed_consumed 1) 1 0)))
+      (= (= (select poll_step 1) (- 1)) (not (= (select submitted_count 1) 1)))
+      (=> (= (select submitted_count 1) 1)
+          (> (select poll_step 1) (select enqueue_step 1)))
+      (= (select submit_step 1)
+         (ite (= (select submitted_count 1) 1)
+              (+ 1 (select poll_step 1)) (- 1))))
+    (and
+      (<= 0 (select attempt_step 2))
+      (= (select admitted 2) (or (not gate_enabled) (not close_occurs)
+                                 (< (select attempt_step 2) close_cas_step)))
+      (= (select closed_rejected 2) (not (select admitted 2)))
+      (= (select capacity_rejected 2)
+         (and (select admitted 2) (not (select queue_capacity 2))))
+      (= (select published 2) (and (select admitted 2) (select queue_capacity 2)))
+      (= (= (select release_step 2) (- 1)) (not (select admitted 2)))
+      (=> (select admitted 2) (> (select release_step 2) (select attempt_step 2)))
+      (= (= (select enqueue_step 2) (- 1)) (not (select published 2)))
+      (=> (select published 2)
+          (and (> (select enqueue_step 2) (select attempt_step 2))
+               (< (select enqueue_step 2) (select release_step 2))))
+      (= (select ordinary_consumed 2)
+         (and (select published 2)
+              (or (not close_occurs)
+                  (and (< (select enqueue_step 2) close_barrier_step)
+                       (select ordinary_choice 2)))))
+      (= (select closed_consumed 2)
+         (and (select published 2) close_occurs
+              (not (select ordinary_consumed 2)) closed_drain_enabled
+              (< (select enqueue_step 2) closed_drain_step)))
+      (= (select submitted_count 2)
+         (+ (ite (select ordinary_consumed 2) 1 0)
+            (ite (select closed_consumed 2) 1 0)))
+      (= (= (select poll_step 2) (- 1)) (not (= (select submitted_count 2) 1)))
+      (=> (= (select submitted_count 2) 1)
+          (> (select poll_step 2) (select enqueue_step 2)))
+      (= (select submit_step 2)
+         (ite (= (select submitted_count 2) 1)
+              (+ 1 (select poll_step 2)) (- 1)))))
+  :named control_transition_relation))
+
+; With the shared admission CAS enabled, close cannot cross its active=0
+; boundary until every producer that won admission has executed finally.
+(assert (!
+  (=> (and gate_enabled close_occurs)
+      (and (=> (select admitted 0) (< (select release_step 0) close_barrier_step))
+           (=> (select admitted 1) (< (select release_step 1) close_barrier_step))
+           (=> (select admitted 2) (< (select release_step 2) close_barrier_step))))
+  :named stable_active_zero_barrier))
+
+; q-offer! appends and q-poll! atomically returns the head before popping it.
+; Poll ranks remain independent solver variables; this source-derived queue
+; transition constrains their relative order only when the FIFO implementation
+; is enabled. The separate fault scenario disables it and reverses two polls.
+(assert (!
+  (=> fifo_queue_enabled
+      (and
+        (=> (and (= (select submitted_count 0) 1)
+                 (= (select submitted_count 1) 1))
+            (and (not (= (select enqueue_step 0) (select enqueue_step 1)))
+                 (not (= (select poll_step 0) (select poll_step 1)))
+                 (= (< (select enqueue_step 0) (select enqueue_step 1))
+                    (< (select poll_step 0) (select poll_step 1)))))
+        (=> (and (= (select submitted_count 0) 1)
+                 (= (select submitted_count 2) 1))
+            (and (not (= (select enqueue_step 0) (select enqueue_step 2)))
+                 (not (= (select poll_step 0) (select poll_step 2)))
+                 (= (< (select enqueue_step 0) (select enqueue_step 2))
+                    (< (select poll_step 0) (select poll_step 2)))))
+        (=> (and (= (select submitted_count 1) 1)
+                 (= (select submitted_count 2) 1))
+            (and (not (= (select enqueue_step 1) (select enqueue_step 2)))
+                 (not (= (select poll_step 1) (select poll_step 2)))
+                 (= (< (select enqueue_step 1) (select enqueue_step 2))
+                    (< (select poll_step 1) (select poll_step 2)))))))
+  :named fifo_queue_transition))
+
+; Among submitted callbacks, poll/submission order must preserve queue-CAS order.
+(assert (!
+  (= violation
+     (or
+       (or
+         (and (select closed_rejected 0)
+              (or (select published 0) (> (select submitted_count 0) 0)))
+         (and (select capacity_rejected 0)
+              (or (select published 0) (> (select submitted_count 0) 0)))
+         (and (select published 0) (not (= (select submitted_count 0) 1)))
+         (and gate_enabled close_occurs (select published 0)
+              (> (select enqueue_step 0) close_barrier_step))
+         (and (select closed_rejected 1)
+              (or (select published 1) (> (select submitted_count 1) 0)))
+         (and (select capacity_rejected 1)
+              (or (select published 1) (> (select submitted_count 1) 0)))
+         (and (select published 1) (not (= (select submitted_count 1) 1)))
+         (and gate_enabled close_occurs (select published 1)
+              (> (select enqueue_step 1) close_barrier_step))
+         (and (select closed_rejected 2)
+              (or (select published 2) (> (select submitted_count 2) 0)))
+         (and (select capacity_rejected 2)
+              (or (select published 2) (> (select submitted_count 2) 0)))
+         (and (select published 2) (not (= (select submitted_count 2) 1)))
+         (and gate_enabled close_occurs (select published 2)
+              (> (select enqueue_step 2) close_barrier_step)))
+       (or
+         (and (= (select submitted_count 0) 1)
+              (= (select submitted_count 1) 1)
+              (or (and (< (select enqueue_step 0) (select enqueue_step 1))
+                       (>= (select submit_step 0) (select submit_step 1)))
+                  (and (< (select enqueue_step 1) (select enqueue_step 0))
+                       (>= (select submit_step 1) (select submit_step 0)))))
+         (and (= (select submitted_count 0) 1)
+              (= (select submitted_count 2) 1)
+              (or (and (< (select enqueue_step 0) (select enqueue_step 2))
+                       (>= (select submit_step 0) (select submit_step 2)))
+                  (and (< (select enqueue_step 2) (select enqueue_step 0))
+                       (>= (select submit_step 2) (select submit_step 0)))))
+         (and (= (select submitted_count 1) 1)
+              (= (select submitted_count 2) 1)
+              (or (and (< (select enqueue_step 1) (select enqueue_step 2))
+                       (>= (select submit_step 1) (select submit_step 2)))
+                  (and (< (select enqueue_step 2) (select enqueue_step 1))
+                       (>= (select submit_step 2) (select submit_step 1))))))))
+  :named violation_definition))

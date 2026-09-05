@@ -33,7 +33,7 @@ if (-not $TestAlias.StartsWith("-M:")) {
 }
 
 $env:JOLT_AOT_CACHE = "0"
-$env:JOLT_VERSION = "v0.7.28"
+$env:JOLT_VERSION = "v0.8.1"
 $env:JOLT_SH = "C:\Program Files\Git\bin\sh.exe"
 
 function Invoke-Jolt {
@@ -81,8 +81,8 @@ function Invoke-Jolt {
 
 Push-Location $RuntimePath
 try {
-  # Jolt v0.7.28 host I/O recognizes Windows drive and UNC paths, so retain the
-  # real absolute project directory.
+  # Native absolute project directory; stock v0.8.1 currently fails this gate
+  # in project-relative before tests run. See docs/proofs/ci-20260905.md.
   $env:JOLT_PWD = (Resolve-Path $JoltTcpPath).Path
 
   Write-Host "jolt-tcp native Windows source gate"

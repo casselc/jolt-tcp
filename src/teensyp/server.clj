@@ -357,11 +357,19 @@
   Socket
   (try-write [_ _] false)
   (queue-control [ctx event callback]
-    (when-not (q-offer! (:control-queue ctx) (:control-queue-cap ctx)
-                        [event callback])
-      (throw (ex-control-queue-full ctx)))
-    (mark-pending! ctx)
-    (wake-server! (:srv ctx)))
+    ;; Share the write admission gate so close has one stable-empty producer
+    ;; boundary for both queues. Controls admitted before close are drained by
+    ;; handle-pending-close; controls arriving after it fail synchronously.
+    (when-not (acquire-write-admission! ctx)
+      (throw (ex-socket-closed ctx)))
+    (try
+      (when-not (q-offer! (:control-queue ctx) (:control-queue-cap ctx)
+                          [event callback])
+        (throw (ex-control-queue-full ctx)))
+      (mark-pending! ctx)
+      (wake-server! (:srv ctx))
+      (finally
+        (release-write-admission! ctx))))
   (queue-write [ctx buffer callback]
     (queue-write-entry! ctx buffer callback nil))
   (socket-info [ctx] (:socket-info ctx))
@@ -411,12 +419,14 @@
      (queue-write socket ::close callback))))
 
 (defn pause-reads
-  "Pause reads for this socket (control event, limited by :control-queue-size)."
+  "Pause reads for this socket (control event, limited by :control-queue-size).
+  Throws structured ::socket-closed when socket close admission has ended."
   ([socket]          (queue-control socket ::pause-reads nil))
   ([socket callback] (queue-control socket ::pause-reads callback)))
 
 (defn resume-reads
-  "Resume reads; forces a read-handler call if buffered data waits."
+  "Resume reads; forces a read-handler call if buffered data waits.
+  Throws structured ::socket-closed when socket close admission has ended."
   ([socket]          (queue-control socket ::resume-reads nil))
   ([socket callback] (queue-control socket ::resume-reads callback)))
 
@@ -604,6 +614,22 @@
             (when completion (deliver completion failure))))
         (recur)))))
 
+(defn- settle-pending-controls!
+  "Apply and complete controls admitted before the socket close barrier.
+
+  CLOSED sockets cannot re-enter the ordinary control handler because resume
+  may schedule application reads. The effects are otherwise harmless at
+  retirement, and submitting callbacks in queue order preserves the existing
+  completion boundary for every operation that won admission."
+  [srv ctx]
+  (loop []
+    (when-some [[event callback] (q-poll! (:control-queue ctx))]
+      (case event
+        ::pause-reads  (set-flag! ctx PAUSED)
+        ::resume-reads (unset-flag! ctx PAUSED))
+      (when callback (submit-callback srv callback))
+      (recur))))
+
 (defn- fail-connection!
   "Reactor-owned connection failure path: revoke writes, settle outcomes, close."
   [srv ctx ex]
@@ -751,6 +777,7 @@
   [srv ctx]
   (when (and (flag? ctx CLOSED) (not (flag? ctx WORKING))
              (current-context? srv ctx))
+    (settle-pending-controls! srv ctx)
     (fail-pending-writes! srv ctx @(:close-ex ctx))
     (swap! (:conns srv) dissoc (:generation ctx))
     (try (net/remove-registration! (:poller srv) @(:token ctx))
@@ -1047,6 +1074,7 @@
         (reset! (:conns srv) {})
         (doseq [ctx ctxs]
           (handle-close ctx @(:close-ex ctx))
+          (settle-pending-controls! srv ctx)
           (fail-pending-writes! srv ctx @(:close-ex ctx))
           (retire-registration! srv @(:token ctx) (:socket ctx))
           (when-let [callback @(:close-callback ctx)]
